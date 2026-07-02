@@ -7,8 +7,8 @@ const os = require('os');
 // 0. CONFIGURAÇÃO VIA ENV
 // =====================================================================
 const ENV_TARGET_RPM        = parseInt(process.env.PROXY_TARGET_RPM, 10) || 40;
-const ENV_CONN_TIMEOUT_MS   = parseInt(process.env.PROXY_CONN_TIMEOUT_MS, 10) || 30000;
-const ENV_STREAM_TIMEOUT_MS = parseInt(process.env.PROXY_STREAM_TIMEOUT_MS, 10) || 300000;
+const ENV_CONN_TIMEOUT_MS   = parseInt(process.env.PROXY_CONN_TIMEOUT_MS, 10) || 45000;
+const ENV_STREAM_TIMEOUT_MS = parseInt(process.env.PROXY_STREAM_TIMEOUT_MS, 10) || 90000;
 const ENV_MAX_CONCURRENT    = parseInt(process.env.PROXY_MAX_CONCURRENT, 10) || 1;
 const ENV_PORT              = parseInt(process.env.PROXY_PORT, 10) || 9999;
 const ENV_HOST              = process.env.PROXY_HOST || '127.0.0.1';
@@ -116,10 +116,13 @@ function getVisualTag(providerName, model, keyIdx) {
   const m = model.includes('/') ? model.split('/').pop() : model;
   const ptag = PROVIDER_LABEL[providerName] || providerName.toUpperCase();
   let wrap = s => s;
-  if (model.includes('glm'))           wrap = s => `\x1b[31m${s}\x1b[0m`;
-  else if (model.includes('kimi'))      wrap = s => `\x1b[35m${s}\x1b[0m`;
-  else if (model.includes('deepseek'))  wrap = s => `\x1b[34m${s}\x1b[0m`;
-  else if (model.includes('minimax'))   wrap = s => `\x1b[33m${s}\x1b[0m`;
+  if (model.includes('minimax-m3'))              wrap = s => `\x1b[31m${s}\x1b[0m`; // Vermelho
+  // else if (model.includes('glm-5.2'))          wrap = s => `\x1b[35m${s}\x1b[0m`;
+  else if (model.includes('kimi-k2.6'))         wrap = s => `\x1b[35m${s}\x1b[0m`; // Magenta
+  else if (model.includes('step-3.7-flash'))     wrap = s => `\x1b[32m${s}\x1b[0m`; // Verde
+  else if (model.includes('minimax-m2.7'))       wrap = s => `\x1b[33m${s}\x1b[0m`; // Amarelo
+  else if (model.includes('deepseek-v4-pro'))    wrap = s => `\x1b[34m${s}\x1b[0m`; // Azul
+  else if (model.includes('deepseek-v4-flash'))  wrap = s => `\x1b[36m${s}\x1b[0m`; // Ciano
   return `${wrap(m)} [${ptag} K${k}]`;
 }
 
@@ -242,14 +245,25 @@ let globalKeyToggle = 1;
 let lastUsedModel = null;
 let keysUsedSinceReset = new Set();
 
-const DEFAULT_MODEL_ORDER = ['glm', 'kimi', 'deepseek', 'minimax'];
+const DEFAULT_MODEL_ORDER = [
+// 'glm-5.2',
+  'kimi-k2.6',
+'step-3.7-flash',
+'minimax-m2.7',
+'deepseek-v4-pro',
+'minimax-m3',
+'deepseek-v4-flash'
+];
 let modelOrder = [...DEFAULT_MODEL_ORDER];
 
 const MODEL_MAP = {
-  glm:      { provider: 'nvidia', model: 'z-ai/glm-5.1' },
-  kimi:     { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
-  deepseek: { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
-  minimax:  { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
+  // 'glm-5.2':           { provider: 'nvidia', model: 'z-ai/glm-5.2' },
+  'kimi-k2.6':           { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
+  'step-3.7-flash':      { provider: 'nvidia', model: 'stepfun-ai/step-3.7-flash' },
+  'minimax-m2.7':        { provider: 'nvidia', model: 'minimaxai/minimax-m2.7' },
+  'deepseek-v4-pro':     { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
+  'minimax-m3':          { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
+  'deepseek-v4-flash':   { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-flash' },
 };
 
 function getModelDef(name) {
@@ -769,14 +783,24 @@ const server = http.createServer(async (req, res) => {
             if (kimiState.kimiNeedsFallback && !clientDisconnected) {
               kimiState.kimiFinishChunkBuf = null;
 
-              const streamId = kimiState.kimiStreamId || 'chatcmpl-fallback';
+              // Resetar estados para o modelo de fallback (evita mistura com o Kimi original)
+              tagState = { reasoningTaggedModel: null, contentTaggedModel: null };
+              const fallbackKimiState = {
+                kimiEmittedAnswer: false,
+                kimiReasoningBuf: '',
+                kimiFinishChunkBuf: null,
+                kimiStreamId: null,
+                kimiNeedsFallback: false
+              };
+
+              let fallbackStreamId = kimiState.kimiStreamId || 'chatcmpl-fallback';
 
               const fallbackNotice = 'data: ' + JSON.stringify({
-                id: streamId,
+                id: fallbackStreamId,
                 object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000),
-                model: endpoint.model,
-                choices: [{ delta: { content: '\n[Fallback: modelo anterior não respondeu]\n\n' }, index: 0, finish_reason: null }]
+                model: 'proxy-fallback',
+                choices: [{ delta: { content: '\n\n\n' }, index: 0, finish_reason: null }]
               }) + '\n\n';
               await writeSSE(res, fallbackNotice);
 
@@ -842,38 +866,38 @@ const server = http.createServer(async (req, res) => {
 
                   getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
 
-                  let fbSseBuffer = '';
-                  const fbIsKimi = nextEp.model.includes('kimi');
+              const fbIsKimi = nextEp.model.includes('kimi');
 
-                  try {
-                    for await (let fbChunk of fbResponse.body) {
-                      if (clientDisconnected) break;
-                      resetChunkTimer(fbController);
-                      if (fbChunk instanceof Uint8Array) fbChunk = Buffer.from(fbChunk);
-                      fbSseBuffer += fbChunk.toString('utf-8');
+              let fbSseBuffer = '';
+              try {
+                for await (let fbChunk of fbResponse.body) {
+                  if (clientDisconnected) break;
+                  resetChunkTimer(fbController);
+                  if (fbChunk instanceof Uint8Array) fbChunk = Buffer.from(fbChunk);
+                  fbSseBuffer += fbChunk.toString('utf-8');
 
-                      let fbEvents = fbSseBuffer.split('\n\n');
-                      fbSseBuffer = fbEvents.pop();
+                  let fbEvents = fbSseBuffer.split('\n\n');
+                  fbSseBuffer = fbEvents.pop();
 
-                      for (let fbEventStr of fbEvents) {
-                        if (!fbEventStr.trim()) continue;
+                  for (let fbEventStr of fbEvents) {
+                    if (!fbEventStr.trim()) continue;
 
-                        fbEventStr = normalizeSSEEvent(fbEventStr, fbIsKimi, kimiState);
-                        const { eventStr: fbTaggedStr } = injectModelTag(fbEventStr, nextEp.model, tagState);
-                        if (kimiState.kimiStreamId) {
-                          fbEventStr = fbTaggedStr.replace(/"id"\s*:\s*"[^"]*"/g, '"id":"' + kimiState.kimiStreamId + '"');
-                        }
-                        await writeSSE(res, (kimiState.kimiStreamId ? fbEventStr : fbTaggedStr) + '\n\n');
-                      }
+                    fbEventStr = normalizeSSEEvent(fbEventStr, fbIsKimi, fallbackKimiState);
+                    const { eventStr: fbTaggedStr } = injectModelTag(fbEventStr, nextEp.model, tagState);
+                    if (fallbackKimiState.kimiStreamId) {
+                      fbEventStr = fbTaggedStr.replace(/"id"\s*:\s*"[^"]*"/g, '"id":"' + fallbackStreamId + '"');
                     }
-                    if (fbSseBuffer.trim()) {
-                      fbSseBuffer = normalizeSSEEvent(fbSseBuffer, fbIsKimi, kimiState);
-                      const { eventStr: fbTaggedStr } = injectModelTag(fbSseBuffer, nextEp.model, tagState);
-                      if (kimiState.kimiStreamId) {
-                        fbSseBuffer = fbTaggedStr.replace(/"id"\s*:\s*"[^"]*"/g, '"id":"' + kimiState.kimiStreamId + '"');
-                      }
-                      await writeSSE(res, (kimiState.kimiStreamId ? fbSseBuffer : fbTaggedStr) + '\n\n');
-                    }
+                    await writeSSE(res, (fallbackKimiState.kimiStreamId ? fbEventStr : fbTaggedStr) + '\n\n');
+                  }
+                }
+                if (fbSseBuffer.trim()) {
+                  fbSseBuffer = normalizeSSEEvent(fbSseBuffer, fbIsKimi, fallbackKimiState);
+                  const { eventStr: fbTaggedStr } = injectModelTag(fbSseBuffer, nextEp.model, tagState);
+                  if (fallbackKimiState.kimiStreamId) {
+                    fbSseBuffer = fbTaggedStr.replace(/"id"\s*:\s*"[^"]*"/g, '"id":"' + fallbackStreamId + '"');
+                  }
+                  await writeSSE(res, (fallbackKimiState.kimiStreamId ? fbSseBuffer : fbTaggedStr) + '\n\n');
+                }
                   } catch (fbStreamErr) {
                     console.warn(`${getLogTime()} ⚠️ [Fallback Stream] Cortado: ${fbStreamErr.message}`);
                     recordRequest(nextEp.model, Date.now() - requestStartTime, true, true);
