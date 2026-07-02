@@ -56,7 +56,9 @@ bash proxy-opencode-router-start.sh
 - `D` — liga/desliga modo debug (gera `debug.log` ao lado do `.js`)
 - `Ctrl+C` / `Ctrl+D` — encerra o proxy
 
-## Atenção
+## Versionamento
 
-- **Nunca** commite o `.env` — ele está no `.gitignore`.
-- Sem `package.json`, testes, lint, formatter ou CI. Mudanças exigem teste manual.
+- A versão do proxy é exibida no terminal ao iniciar (`Proxy-Opencode v1.0.0`).
+- **Regra:** a cada modificação funcional (bug fix, feature, ajuste de comportamento), **atualize a versão** no banner de inicialização do proxy.
+- Isso facilita rastrear regressões e saber qual versão está rodando.
+- Format sugerido: `v1.0.1`, `v1.1.0`, `v1.2.0` etc. (semantic versioning simples).
