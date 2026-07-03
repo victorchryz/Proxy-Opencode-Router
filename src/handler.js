@@ -497,9 +497,13 @@ export async function handleRequest(req, res) {
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
-            if (isKimi && !kimiState.kimiEmittedAnswer && !clientRef.value) {
-              kimiState.kimiNeedsFallback = true;
-              console.log(`${ts()} [${endpoint.name}] Sem resposta real (silêncio/corte). Acionando fallback.`);
+            if (isKimi && !clientRef.value) {
+              const hasToolCalls = kimiState.kimiEmittedAnswer;
+              const c = kimiState.kimiContentBuf.trimEnd();
+              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...'))) {
+                kimiState.kimiNeedsFallback = true;
+                console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
+              }
             }
           }
 

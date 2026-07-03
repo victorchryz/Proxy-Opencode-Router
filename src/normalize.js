@@ -20,7 +20,7 @@ const STRIP_CJK = process.env.PROXY_STRIP_CJK === '1';
 
 /** @typedef {{ reasoningTaggedModel: string|null, contentTaggedModel: string|null }} TagState */
 
-/** @typedef {{ kimiEmittedAnswer: boolean, kimiReasoningBuf: string, kimiStreamId: string|null, kimiFinishChunkBuf: string|null, kimiDoneBuf: string|null, kimiNeedsFallback: boolean }} KimiState */
+/** @typedef {{ kimiEmittedAnswer: boolean, kimiReasoningBuf: string, kimiContentBuf: string, kimiStreamId: string|null, kimiFinishChunkBuf: string|null, kimiDoneBuf: string|null, kimiNeedsFallback: boolean }} KimiState */
 
 export function newTagState() {
   return { reasoningTaggedModel: null, contentTaggedModel: null };
@@ -30,6 +30,7 @@ export function newKimiState() {
   return {
     kimiEmittedAnswer: false,
     kimiReasoningBuf: '',
+    kimiContentBuf: '',
     kimiStreamId: null,
     kimiFinishChunkBuf: null,
     kimiDoneBuf: null,
@@ -173,7 +174,7 @@ export function normalizeSSEEvent(eventStr, isKimi, kimiState) {
     if (STRIP_CJK && delta.reasoning_content) delta.reasoning_content = delta.reasoning_content.replace(CJK_RE, '');
 
     if (kimiState) {
-      if (delta.content && delta.content.trim() !== '') kimiState.kimiEmittedAnswer = true;
+      if (delta.content) kimiState.kimiContentBuf += delta.content;
       if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
         kimiState.kimiEmittedAnswer = true;
       }
