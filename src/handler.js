@@ -15,7 +15,7 @@ import {
   earliestUnblockMs,
   activeCount,
 } from './state.js';
-import { buildDynamicCascade, sinkModel, getLastUsedModel, setLastUsedModel, getGlobalKeyToggle, getKeysUsedSinceReset, resetModelOrder } from './cascade.js';
+import { buildDynamicCascade, setLastUsedModel } from './cascade.js';
 import {
   normalizeSSEEvent,
   injectModelTag,
@@ -470,14 +470,7 @@ export async function handleRequest(req, res) {
           }
 
           // ----- Success: stream the response -----
-          sinkModel(endpoint.name);
           setLastUsedModel(endpoint.name);
-          getKeysUsedSinceReset().add(getGlobalKeyToggle());
-          if (getKeysUsedSinceReset().size >= PROVIDERS[endpoint.provider].keys.length) {
-            resetModelOrder();
-            setLastUsedModel(null);
-            getKeysUsedSinceReset().clear();
-          }
           state.backoffIndex = 0;
           attemptsLog.push(`OK ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 

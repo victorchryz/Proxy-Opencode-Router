@@ -1,7 +1,7 @@
 # AGENTS.md — Proxy-Opencode-Router
 
 Proxy HTTP modular que roteia requisições OpenCode → NVIDIA API com cascata
-tier-aware (primários/fallback), anti-repetição cross-key e fallback automático.
+de prioridade fixa, anti-repetição cross-key e fallback automático.
 
 ## Regras gerais
 
@@ -47,7 +47,7 @@ Proxy-Opencode-Router/
 ├── AGENTS.md
 ├── README.md
 └── src/
-    ├── cascade.js        # Cascata tier-aware (Forma C)
+    ├── cascade.js        # Cascata de prioridade fixa
     ├── handler.js        # Handler principal de requisições
     ├── state.js          # Backoff, RPM limiter, concurrency slots
     ├── providers.js      # Definições de providers e chaves
@@ -77,22 +77,19 @@ Proxy-Opencode-Router/
 
 ## Comportamentos críticos
 
-### Cascata tier-aware (Forma C)
+### Cascata com prioridade fixa
 
-Modelos são divididos em dois tiers:
-- **Primários:** `glm-5.2`, `deepseek-v4-pro` (prioridade máxima)
-- **Fallback:** `kimi-k2.6`, `minimax-m3` (usados quando primários indisponíveis)
+Ordem fixa de preferência: `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
 
-Ordem padrão: `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
-
-- **sinkModel:** após sucesso, o modelo usado vai para o final do **seu tier**
-  (primários sempre ficam antes dos fallback)
-- **lastUsedModel:** anti-repetição cross-key — se o primeiro modelo da ordem
-  é igual ao último usado, ele é movido para o final
-- **Reset:** a ordem só reseta para default quando **ambas as chaves** (K1 e K2)
-  completam um ciclo (tracked via `keysUsedSinceReset`)
-- **Alternância K1↔K2:** `globalKeyToggle` alterna a chave inicial a cada request
-- **Bloqueio é per-key:** modelo bloqueado em K1 não afeta K2
+- **Alternância K1↔K2:** `globalKeyToggle` alterna a chave a cada request
+- **lastUsedModel:** anti-repetição — se o modelo usado na última requisição
+  bem-sucedida é o primeiro da lista, ele é pulado e o próximo é usado
+- **Bloqueio é per-key:** modelo bloqueado em K1 não afeta K2. Se um modelo
+  está bloqueado na key atual, o próximo modelo da lista é tentado
+- **Fallback de key:** se todos os modelos estão bloqueados na key atual,
+  tenta a outra key com a mesma ordem de prioridade
+- **Absolute fallback:** se todos os 8 pares (modelo×key) estão bloqueados,
+  ignora bloqueios e tenta GLM na key atual
 
 ### Backoff
 

@@ -1,13 +1,12 @@
 # Proxy-Opencode-Router
 
-Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) para a API da NVIDIA, com cascata tier-aware (primários/fallback), anti-repetição cross-key e fallback automático.
+Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) para a API da NVIDIA, com cascata de prioridade fixa, anti-repetição cross-key e fallback automático.
 
 ## Funcionalidades
 
-- **Cascata tier-aware:** modelos primários (`glm-5.2`, `deepseek-v4-pro`) têm prioridade sobre fallback (`kimi-k2.6`, `minimax-m3`)
-- **Anti-repetição cross-key:** o último modelo usado nunca se repete na próxima requisição (K1↔K2)
-- **sinkModel:** após sucesso, o modelo vai para o final do seu tier
-- **Reset cíclico:** a ordem reseta para default após ambas as chaves completarem um ciclo
+- **Cascata com prioridade fixa:** `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
+- **Anti-repetição cross-key:** o último modelo usado é pulado na próxima requisição (K1↔K2)
+- **Fallback de key:** se todos os modelos estão bloqueados na key atual, tenta a outra
 - **Fallback Kimi automático:** se Kimi retorna só raciocínio (sem resposta), tenta todos os modelos não-Kimi em cascata
 - **Backoff inteligente:** escala progressiva em erros 5xx, respeito a `Retry-After` em 429, DEGRADED tratado como 429
 - **Synthetic SSE errors:** todos os erros emitem stream SSE com `finish_reason: 'stop'` + `[DONE]` — sem travar o OpenCode
@@ -19,14 +18,14 @@ Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) p
 
 ## Modelos suportados
 
-| Tier | Modelo | Ordem padrão |
-|---|---|---|
-| Primário | **GLM-5.2** (Thinking) | 1º |
-| Primário | **DeepSeek V4 Pro** (Thinking) | 2º |
-| Fallback | **Kimi K2.6** | 3º |
-| Fallback | **MiniMax M3** (Thinking) | 4º |
+| Prioridade | Modelo |
+|---|---|
+| 1º | **GLM-5.2** (Thinking) |
+| 2º | **DeepSeek V4 Pro** (Thinking) |
+| 3º | **Kimi K2.6** |
+| 4º | **MiniMax M3** (Thinking) |
 
-> A cada requisição bem-sucedida, o modelo usado vai para o **final do seu tier**. A ordem só reseta quando ambas as chaves (K1 e K2) completam um ciclo.
+> A ordem é fixa. A cada requisição, o último modelo usado é pulado (anti-repetição).
 
 ## Início rápido
 
@@ -126,7 +125,7 @@ Proxy-Opencode-Router/
 ├── AGENTS.md
 ├── README.md
 └── src/
-    ├── cascade.js        # Cascata tier-aware
+    ├── cascade.js        # Cascata de prioridade fixa
     ├── handler.js        # Handler principal
     ├── state.js          # Backoff, RPM, concorrência
     ├── providers.js      # Chaves NVIDIA
