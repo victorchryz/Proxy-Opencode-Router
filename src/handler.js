@@ -495,12 +495,19 @@ export async function handleRequest(req, res) {
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
-            if (isKimi && !clientRef.value) {
+            if (isKimi) {
               const hasToolCalls = kimiState.kimiEmittedAnswer;
               const c = kimiState.kimiContentBuf.trimEnd();
-              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(',') || c.endsWith('<') || c.endsWith('>') || c.endsWith('{') || c.endsWith('}') || c.endsWith('[') || c.endsWith(']') || c.endsWith('(') || c.endsWith(')'))) {
-                kimiState.kimiNeedsFallback = true;
-                console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
+              console.log(`${ts()} [KIMI-FIM] contentLen=${kimiState.kimiContentBuf.length} tail=${JSON.stringify(c.slice(-40))} toolCalls=${hasToolCalls} clientGone=${clientRef.value}`);
+              if (!clientRef.value) {
+                if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(',') || c.endsWith('<') || c.endsWith('>') || c.endsWith('{') || c.endsWith('}') || c.endsWith('[') || c.endsWith(']') || c.endsWith('(') || c.endsWith(')'))) {
+                  kimiState.kimiNeedsFallback = true;
+                  console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
+                } else {
+                  console.log(`${ts()} [${endpoint.name}] Resposta considerada completa (sem fallback).`);
+                }
+              } else {
+                console.log(`${ts()} [${endpoint.name}] Cliente desconectado — fallback não acionado.`);
               }
             }
           }
