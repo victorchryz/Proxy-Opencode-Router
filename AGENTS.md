@@ -11,6 +11,9 @@ de prioridade fixa, anti-repetição cross-key e fallback automático.
 - **Sem comentários:** não adicione comentários no código a menos que solicitado.
 - **Não delete:** nunca delete diretório ou arquivo sem confirmação explícita
   do usuário.
+- **Não instale:** nunca instale pacotes, dependências ou ferramentas sem
+  confirmação explícita do usuário. Após qualquer instalação, liste o que foi
+  instalado para que possa ser removido quando não for mais necessário.
 - **Versionamento:** a cada modificação funcional, atualize a versão no banner
   de inicialização do proxy (formato: `v1.0.1`, `v1.1.0`, etc.).
 

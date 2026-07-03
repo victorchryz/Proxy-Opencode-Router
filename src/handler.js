@@ -488,9 +488,7 @@ export async function handleRequest(req, res) {
           try {
             await pumpStream(response, res, endpoint, tagState, kimiState, controller, chunkTimer, clientRef);
           } catch (streamErr) {
-            // A stream error after headers were sent means the client is mid-stream.
-            // Re-throw so the outer catch handles closure properly.
-            if (res.headersSent && !clientRef.value) {
+            if (res.headersSent && !clientRef.value && !isKimi) {
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
               throw streamErr;
             }
@@ -500,7 +498,7 @@ export async function handleRequest(req, res) {
             if (isKimi && !clientRef.value) {
               const hasToolCalls = kimiState.kimiEmittedAnswer;
               const c = kimiState.kimiContentBuf.trimEnd();
-              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...'))) {
+              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(','))) {
                 kimiState.kimiNeedsFallback = true;
                 console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
               }

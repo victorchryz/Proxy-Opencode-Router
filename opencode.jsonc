@@ -62,5 +62,5 @@
       }
     }
   },
-  "model": "nvidia/minimaxai/minimax-m3"
+  "model": "nvidia/z-ai/glm-5.2"
 }
