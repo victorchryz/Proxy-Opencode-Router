@@ -498,7 +498,7 @@ export async function handleRequest(req, res) {
             if (isKimi && !clientRef.value) {
               const hasToolCalls = kimiState.kimiEmittedAnswer;
               const c = kimiState.kimiContentBuf.trimEnd();
-              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(','))) {
+              if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(',') || c.endsWith('<') || c.endsWith('>') || c.endsWith('{') || c.endsWith('}') || c.endsWith('[') || c.endsWith(']') || c.endsWith('(') || c.endsWith(')'))) {
                 kimiState.kimiNeedsFallback = true;
                 console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
               }
