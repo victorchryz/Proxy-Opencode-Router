@@ -3,6 +3,17 @@
 Proxy HTTP modular que roteia requisições OpenCode → NVIDIA API com cascata
 tier-aware (primários/fallback), anti-repetição cross-key e fallback automático.
 
+## Regras gerais
+
+- **Idioma:** sempre use **pt-br** em documentação, comentários, mensagens de
+  commit e comunicação.
+- **Commits:** faça commit + push após cada modificação funcional.
+- **Sem comentários:** não adicione comentários no código a menos que solicitado.
+- **Não delete:** nunca delete diretório ou arquivo sem confirmação explícita
+  do usuário.
+- **Versionamento:** a cada modificação funcional, atualize a versão no banner
+  de inicialização do proxy (formato: `v1.0.1`, `v1.1.0`, etc.).
+
 ## Como iniciar
 
 ```bash
@@ -18,6 +29,7 @@ node index.js          # foreground
 ```
 
 - Proxy escuta em `127.0.0.1:9999/v1` (configurável via env)
+- Precisa estar rodando para o OpenCode funcionar com provider `nvidia`
 - Para parar: `./stop.sh` (mata foreground e daemon)
 
 ## Estrutura do projeto
@@ -55,8 +67,8 @@ Proxy-Opencode-Router/
 | `NVIDIA_KEY_2` | — | Chave de API NVIDIA (opcional) |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com` | Base URL da API NVIDIA |
 | `PROXY_TARGET_RPM` | 40 | Rate limit global (requests/min) |
-| `PROXY_CONN_TIMEOUT_MS` | 30000 | Timeout de conexão inicial (ms) |
-| `PROXY_STREAM_TIMEOUT_MS` | 300000 | Timeout de silêncio no stream (ms) |
+| `PROXY_CONN_TIMEOUT_MS` | 60000 | Timeout de conexão inicial (ms) |
+| `PROXY_STREAM_TIMEOUT_MS` | 90000 | Timeout de silêncio no stream (ms) |
 | `PROXY_MAX_CONCURRENT` | 1 | Requisições simultâneas |
 | `PROXY_PORT` | 9999 | Porta do proxy |
 | `PROXY_HOST` | 127.0.0.1 | Host do proxy |
@@ -122,7 +134,7 @@ já aplicam seus próprios limites de contexto/tokens.
 ## Atalhos no terminal
 
 - `D` — liga/desliga modo debug (gera `debug.log`)
-- `Ctrl+C` — encerra o proxy (foreground)
+- `Ctrl+C` / `Ctrl+D` — encerra o proxy (foreground)
 
 ## Configuração do OpenCode
 
@@ -132,6 +144,9 @@ O proxy faz hot-reload automático (~1s) do arquivo.
 - `baseURL`: `http://127.0.0.1:9999/v1`
 - `apiKey`: fictício — o proxy injeta a chave real
 - `maxConcurrency`: 1 (o proxy já controla concorrência)
+- As chaves NVIDIA ficam no **`.env`** (não versionado). O script `start.sh`
+  valida presença e valor antes de iniciar.
+- `configPath` usa `os.homedir()` como fallback se `$HOME` não existe.
 
 ## Versionamento
 
