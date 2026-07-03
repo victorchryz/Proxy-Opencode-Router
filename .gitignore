@@ -2,3 +2,5 @@
 env.example
 debug.log
 node_modules/
+nvidia-proxy.zip
+proxy.log

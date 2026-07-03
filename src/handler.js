@@ -101,17 +101,11 @@ async function sendSyntheticChunk(res, streamId, content, model = 'proxy') {
   );
 }
 
-/** Read the entire request body into a string, with a size cap to prevent
- *  memory exhaustion from oversized payloads. */
+/** Read the entire request body into a string. No size cap — both the client
+ *  (opencode) and the upstream API (NVIDIA) enforce their own limits. */
 async function readBody(req) {
-  const MAX_BODY_BYTES = parseInt(process.env.PROXY_MAX_BODY_BYTES, 10) || 10 * 1024 * 1024; // 10 MB default
   const chunks = [];
-  let total = 0;
   for await (const c of req) {
-    total += c.length;
-    if (total > MAX_BODY_BYTES) {
-      throw new Error(`Body excede limite de ${MAX_BODY_BYTES} bytes`);
-    }
     chunks.push(c);
   }
   return Buffer.concat(chunks).toString('utf-8');
@@ -334,15 +328,7 @@ export async function handleRequest(req, res) {
   }
 
   // ----- Read + parse inbound body -----
-  let bodyString;
-  try {
-    bodyString = await readBody(req);
-  } catch (err) {
-    res.writeHead(413, { 'Content-Type': 'application/json' });
-    return res.end(
-      JSON.stringify({ error: { message: err.message, type: 'proxy_body_too_large' } }),
-    );
-  }
+  let bodyString = await readBody(req);
   if (isDebug()) debug(`\n=== [OPENCODE -> PROXY] ${new Date().toISOString()} ===\n${bodyString}\n`);
 
   /** @type {Record<string, any>} */
@@ -455,8 +441,27 @@ export async function handleRequest(req, res) {
 
             if (abortCascade) {
               if (!res.headersSent) {
-                res.writeHead(response.status, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: errBody, type: 'proxy_abort_error' } }));
+                const wantsStream = parsedOriginal?.stream !== false;
+                if (wantsStream) {
+                  const abortStreamId = 'chatcmpl-proxy-abort';
+                  res.writeHead(200, {
+                    'Content-Type': 'text/event-stream',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                  });
+                  const abortMsg = `\n[Proxy: erro ${response.status} — requisição inválida, não retriable]`;
+                  await sendSyntheticChunk(res, abortStreamId, abortMsg);
+                  await writeSSE(res, 'data: ' + JSON.stringify({
+                    id: abortStreamId, object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000), model: 'proxy',
+                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+                  }) + '\n\n');
+                  if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+                  res.end();
+                } else {
+                  res.writeHead(response.status, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: { message: errBody, type: 'proxy_abort_error' } }));
+                }
               }
               requestComplete = true;
             }
@@ -691,27 +696,75 @@ export async function handleRequest(req, res) {
       console.log(`${ts()} [RESUMO] ${attemptsLog.join(' -> ')} | ${total}s`);
     }
 
-    // Every endpoint failed without aborting — emit a 429/503 to the client.
+    // Every endpoint failed without aborting — emit a synthetic SSE stream
+    // so the client (opencode) sees a completed response instead of a hard
+    // 429/503 JSON error. A hard error makes opencode stop and require the
+    // user to type "." to retry; a synthetic stream lets the conversation
+    // continue seamlessly.
     if (!requestComplete && !res.headersSent && !clientRef.value) {
       const unblock = earliestUnblockMs();
       const waitSec = Math.ceil((unblock - Date.now()) / 1000);
-      if (waitSec > 0 && waitSec < 30 * 60) {
-        res.writeHead(429, { 'Retry-After': String(waitSec), 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            error: { message: `Todos os endpoints bloqueados. Tente em ${waitSec}s.`, type: 'proxy_overload' },
-          }),
-        );
+      const wantsStream = parsedOriginal?.stream !== false;
+
+      if (wantsStream) {
+        const msg = waitSec > 0 && waitSec < 30 * 60
+          ? `\n[Proxy: todos os modelos indisponíveis — aguarde ${waitSec}s e reenvie]`
+          : '\n[Proxy: serviço indisponível — tente novamente]';
+        const errStreamId = 'chatcmpl-proxy-exhausted';
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+        await sendSyntheticChunk(res, errStreamId, msg);
+        await writeSSE(res, 'data: ' + JSON.stringify({
+          id: errStreamId, object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000), model: 'proxy',
+          choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+        }) + '\n\n');
+        if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+        res.end();
       } else {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Serviço indisponível.', type: 'proxy_unavailable' } }));
+        if (waitSec > 0 && waitSec < 30 * 60) {
+          res.writeHead(429, { 'Retry-After': String(waitSec), 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: { message: `Todos os endpoints bloqueados. Tente em ${waitSec}s.`, type: 'proxy_overload' },
+            }),
+          );
+        } else {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'Serviço indisponível.', type: 'proxy_unavailable' } }));
+        }
       }
     }
   } catch (err) {
     console.error(`${ts()} [CRÍTICO] Erro interno: ${err?.stack ?? err}`);
     if (!res.headersSent && !clientRef.value) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'Proxy Error', type: 'proxy_internal' } }));
+      const wantsStream = parsedOriginal?.stream !== false;
+      if (wantsStream) {
+        const errStreamId = 'chatcmpl-proxy-error';
+        try {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          });
+          await sendSyntheticChunk(res, errStreamId, '\n[Proxy: erro interno — tente novamente]');
+          await writeSSE(res, 'data: ' + JSON.stringify({
+            id: errStreamId, object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000), model: 'proxy',
+            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+          }) + '\n\n');
+          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+          res.end();
+        } catch {
+          try { res.destroy(); } catch { /* ignore */ }
+        }
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Proxy Error', type: 'proxy_internal' } }));
+      }
     }
   } finally {
     clientRef.controller = null;
@@ -725,11 +778,34 @@ export function createServer() {
     // Always have a top-level catch so a thrown sync error never crashes the
     // server process. handleRequest already does its own try/catch, this is
     // belt-and-suspenders for readBody / acquireSlot edge cases.
-    handleRequest(req, res).catch((err) => {
+    handleRequest(req, res).catch(async (err) => {
       console.error(`${ts()} [UNCAUGHT] ${err?.stack ?? err}`);
       if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Proxy Error', type: 'proxy_internal' } }));
+        try {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          });
+          await writeSSE(res, 'data: ' + JSON.stringify({
+            id: 'chatcmpl-proxy-uncaught',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: 'proxy',
+            choices: [{ delta: { content: '\n[Proxy: erro interno — tente novamente]' }, index: 0, finish_reason: null }],
+          }) + '\n\n');
+          await writeSSE(res, 'data: ' + JSON.stringify({
+            id: 'chatcmpl-proxy-uncaught',
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: 'proxy',
+            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+          }) + '\n\n');
+          await writeSSE(res, 'data: [DONE]\n\n');
+          res.end();
+        } catch {
+          try { res.destroy(); } catch { /* ignore */ }
+        }
       }
     });
   });
