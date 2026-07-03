@@ -4,3 +4,5 @@ debug.log
 node_modules/
 nvidia-proxy.zip
 proxy.log
+bkup-projeto-antigo/
+proxy-opencode-router-start.sh
