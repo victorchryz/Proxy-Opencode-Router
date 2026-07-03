@@ -239,6 +239,7 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
       for (let eventStr of events) {
         if (!eventStr.trim()) continue;
         eventStr = normalizeSSEEvent(eventStr, isKimi, fallbackKimiState);
+        debug(`[FALLBACK -> PROXY] ${eventStr}`);
         const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
         // Preserve the original stream id so the client sees a continuous stream.
         const out = fallbackKimiState.kimiStreamId
@@ -251,6 +252,7 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
 
     if (sseBuffer.trim() && !clientDisconnectedRef.value) {
       sseBuffer = normalizeSSEEvent(sseBuffer, isKimi, fallbackKimiState);
+      debug(`[FALLBACK -> PROXY] ${sseBuffer}`);
       const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
       const out = fallbackKimiState.kimiStreamId
         ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${fallbackStreamId}"`)
@@ -520,7 +522,7 @@ export async function handleRequest(req, res) {
             const fallbackStreamId = kimiState.kimiStreamId || 'chatcmpl-fallback';
             kimiState.kimiFinishChunkBuf = null;
 
-            await sendSyntheticChunk(res, fallbackStreamId, '\n\n\n', 'proxy-fallback');
+            await sendSyntheticChunk(res, fallbackStreamId, '\n', 'proxy-fallback');
 
             const fallbackTagState = newTagState();
             const fallbackKimiState = newKimiState();
