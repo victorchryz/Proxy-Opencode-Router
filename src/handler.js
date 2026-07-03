@@ -190,10 +190,16 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
   const url = `${provider.baseUrl}${req.url}`;
 
   const controller = new AbortController();
+  // connTimeoutMs: tempo desde fetch() até receber os HEADERS HTTP da NVIDIA.
+  // Limpo por clearTimeout(initialTimer) logo após fetch() resolver. NÃO
+  // mede stream nem "pensamento" pós-headers.
   const initialTimer = setTimeout(
     () => controller.abort(),
     ENV.connTimeoutMs,
   );
+  // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks. Reseta a
+  // cada chunk recebido. NÃO mede duração total — só aborta se ficar 90s
+  // sem receber NENHUM byte.
   const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
     console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados (fallback). Abortando...`);
     controller.abort();
@@ -399,11 +405,20 @@ export async function handleRequest(req, res) {
 
         const controller = new AbortController();
         clientRef.controller = controller;
+        // connTimeoutMs: tempo desde o disparo de fetch() até receber os
+        // HEADERS HTTP da NVIDIA (status + headers). Limpo por
+        // clearTimeout(initialTimer) logo após fetch() resolver. NÃO mede
+        // stream, NÃO mede "pensamento" pós-headers — só o handshake inicial
+        // (TCP+TLS+processamento upstream até o primeiro byte de resposta).
         const initialTimer = setTimeout(() => {
           console.warn(`${ts()} [TIMEOUT] ${ENV.connTimeoutMs}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
           controller.abort();
         }, ENV.connTimeoutMs);
 
+        // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks do
+        // stream SSE. Reseta a cada chunk recebido via chunkTimer.reset().
+        // NÃO mede duração total do stream — só aborta se ficar 90s sem
+        // receber NENHUM byte. Stream lento mas contínuo NUNCA aborta.
         const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
           console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados! Abortando...`);
           controller.abort();
