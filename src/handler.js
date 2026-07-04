@@ -20,7 +20,6 @@ import {
   normalizeSSEEvent,
   injectModelTag,
   newTagState,
-  newKimiState,
 } from './normalize.js';
 import { createProxyHeaders, buildFetchOptions, prepareBody } from './prepare.js';
 import { recordRequest, snapshot as metricsSnapshot } from './metrics.js';
@@ -115,8 +114,7 @@ async function readBody(req) {
  * Stream one upstream response into the client, applying normalization & tags.
  * @returns {Promise<void>}
  */
-async function pumpStream(response, res, endpoint, tagState, kimiState, controller, chunkTimer, clientDisconnectedRef) {
-  const isKimi = endpoint.model.includes('kimi');
+async function pumpStream(response, res, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef) {
   let sseBuffer = '';
   chunkTimer.reset();
 
@@ -134,29 +132,12 @@ async function pumpStream(response, res, endpoint, tagState, kimiState, controll
     for (let eventStr of events) {
       if (!eventStr.trim()) continue;
 
-      if (isKimi && !kimiState.kimiStreamId) {
-        const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
-        if (idMatch) kimiState.kimiStreamId = idMatch[1];
-      }
-
-      eventStr = normalizeSSEEvent(eventStr, isKimi, kimiState);
+      eventStr = normalizeSSEEvent(eventStr);
       debug(`[NVIDIA -> PROXY] ${eventStr}`);
       const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
 
-      // For Kimi: defer both the finish chunk AND the [DONE] marker so we can
-      // still emit a fallback if Kimi never produced real content. NVIDIA
-      // sometimes sends [DONE] *before* the finish chunk, so buffering both
-      // guarantees the client sees them in the right order at the end.
-      const isFinish = isKimi && /"finish_reason"\s*:\s*"(?:stop|length|tool_calls)"/.test(eventStr);
-      const isDone = eventStr.trim() === 'data: [DONE]';
-      if (isFinish) {
-        kimiState.kimiFinishChunkBuf = taggedStr;
-      } else if (isKimi && isDone) {
-        kimiState.kimiDoneBuf = taggedStr;
-      } else {
-        const alive = await writeSSE(res, taggedStr + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      }
+      const alive = await writeSSE(res, taggedStr + '\n\n');
+      if (!alive) { clientDisconnectedRef.value = true; break; }
     }
   }
 
@@ -168,7 +149,7 @@ async function pumpStream(response, res, endpoint, tagState, kimiState, controll
     if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
       try {
         JSON.parse(trimmed.substring(6).trim());
-        sseBuffer = normalizeSSEEvent(sseBuffer, isKimi, kimiState);
+        sseBuffer = normalizeSSEEvent(sseBuffer);
         debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
         const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
         await writeSSE(res, taggedStr + '\n\n');
@@ -184,7 +165,7 @@ async function pumpStream(response, res, endpoint, tagState, kimiState, controll
  * Run a single fallback attempt against `nextEp` and stream it to the client.
  * @returns {Promise<boolean>} `true` if the fallback streamed successfully.
  */
-async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, tagState, fallbackKimiState, clientDisconnectedRef) {
+async function runFallback(req, res, parsedOriginal, nextEp, tagState, clientDisconnectedRef) {
   const provider = PROVIDERS[nextEp.provider];
   const fkIdx = nextEp.physicalKey;
   const url = `${provider.baseUrl}${req.url}`;
@@ -230,7 +211,6 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
     getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
 
     let sseBuffer = '';
-    const isKimi = nextEp.model.includes('kimi');
     chunkTimer.reset();
 
     for await (let chunk of response.body) {
@@ -244,26 +224,19 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
 
       for (let eventStr of events) {
         if (!eventStr.trim()) continue;
-        eventStr = normalizeSSEEvent(eventStr, isKimi, fallbackKimiState);
+        eventStr = normalizeSSEEvent(eventStr);
         debug(`[FALLBACK -> PROXY] ${eventStr}`);
         const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
-        // Preserve the original stream id so the client sees a continuous stream.
-        const out = fallbackKimiState.kimiStreamId
-          ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${fallbackStreamId}"`)
-          : taggedStr;
-        const alive = await writeSSE(res, out + '\n\n');
+        const alive = await writeSSE(res, taggedStr + '\n\n');
         if (!alive) { clientDisconnectedRef.value = true; break; }
       }
     }
 
     if (sseBuffer.trim() && !clientDisconnectedRef.value) {
-      sseBuffer = normalizeSSEEvent(sseBuffer, isKimi, fallbackKimiState);
+      sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[FALLBACK -> PROXY] ${sseBuffer}`);
       const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
-      const out = fallbackKimiState.kimiStreamId
-        ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${fallbackStreamId}"`)
-        : taggedStr;
-      await writeSSE(res, out + '\n\n');
+      await writeSSE(res, taggedStr + '\n\n');
     }
 
     return true;
@@ -499,139 +472,17 @@ export async function handleRequest(req, res) {
           res.writeHead(response.status, resHeaders);
 
           const tagState = newTagState();
-          const kimiState = newKimiState();
-          const isKimi = endpoint.model.includes('kimi');
 
           try {
-            await pumpStream(response, res, endpoint, tagState, kimiState, controller, chunkTimer, clientRef);
+            await pumpStream(response, res, endpoint, tagState, controller, chunkTimer, clientRef);
           } catch (streamErr) {
-            if (res.headersSent && !clientRef.value && !isKimi) {
+            if (res.headersSent && !clientRef.value) {
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
               throw streamErr;
             }
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
-            if (isKimi) {
-              const hasToolCalls = kimiState.kimiEmittedAnswer;
-              const c = kimiState.kimiContentBuf.trimEnd();
-              console.log(`${ts()} [KIMI-FIM] contentLen=${kimiState.kimiContentBuf.length} tail=${JSON.stringify(c.slice(-40))} toolCalls=${hasToolCalls} clientGone=${clientRef.value}`);
-              if (!clientRef.value) {
-                if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(',') || c.endsWith('<') || c.endsWith('>') || c.endsWith('{') || c.endsWith('}') || c.endsWith('[') || c.endsWith(']') || c.endsWith('(') || c.endsWith(')'))) {
-                  kimiState.kimiNeedsFallback = true;
-                  console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
-                } else {
-                  console.log(`${ts()} [${endpoint.name}] Resposta considerada completa (sem fallback).`);
-                }
-              } else {
-                console.log(`${ts()} [${endpoint.name}] Cliente desconectado — fallback não acionado.`);
-              }
-            }
-          }
-
-          // ----- Kimi silent-failure fallback -----
-          // Declared outside the if-block so the finalize block below can
-          // check whether a fallback actually succeeded (for metrics accuracy).
-          let fallbackOk = false;
-          if (kimiState.kimiNeedsFallback && !clientRef.value) {
-            const fallbackStreamId = kimiState.kimiStreamId || 'chatcmpl-fallback';
-            kimiState.kimiFinishChunkBuf = null;
-
-            await sendSyntheticChunk(res, fallbackStreamId, '\n', 'proxy-fallback');
-
-            const fallbackTagState = newTagState();
-            const fallbackKimiState = newKimiState();
-            fallbackKimiState.kimiStreamId = kimiState.kimiStreamId;
-
-            // Build a FRESH body from the ORIGINAL parsedOriginal (not the
-            // Kimi-prepared one). If we used prepareBody(parsedOriginal, endpoint)
-            // here, the body would carry Kimi's model name, KIMI_EXTRA_RULES
-            // system prompt, and Kimi's modelConfigs options — which would then
-            // leak into the fallback model's request even after runFallback
-            // re-prepares it (because prepareBody only ADDS Kimi rules, never
-            // removes them). Using parsedOriginal directly lets runFallback's
-            // internal prepareBody(fbParsedOriginal, nextEp) correctly apply
-            // nextEp's own model, rules, and options.
-            const fbParsedOriginal = { ...parsedOriginal, messages: undefined };
-            if (Array.isArray(parsedOriginal.messages)) {
-              fbParsedOriginal.messages = parsedOriginal.messages.map((m) => ({ ...m }));
-            }
-
-            // Append Kimi's reasoning into the last user message so the fallback
-            // model has the context Kimi was thinking about.
-            if (kimiState.kimiReasoningBuf.trim() && Array.isArray(fbParsedOriginal.messages)) {
-              const lastUserIdx = fbParsedOriginal.messages.findLastIndex?.((m) => m.role === 'user') ?? -1;
-              if (lastUserIdx >= 0) {
-                const suffix =
-                  '\n\n---\nEu mandei essa mesma mensagem pra outra IA e ela me devolveu isso aqui mas não confie cegamente antes de testar:\n\n' +
-                  kimiState.kimiReasoningBuf.trim();
-                const msg = fbParsedOriginal.messages[lastUserIdx];
-                if (Array.isArray(msg.content)) {
-                  const textPart = msg.content.find((p) => p.type === 'text');
-                  if (textPart) textPart.text += suffix;
-                  else msg.content.push({ type: 'text', text: suffix });
-                } else if (typeof msg.content === 'string') {
-                  msg.content += suffix;
-                }
-              }
-            }
-
-            const candidates = cascade.filter(
-              (ep) =>
-                ep.name !== endpoint.name &&
-                Date.now() >= getState(`${ep.provider}:${ep.model}__${ep.physicalKey}`).blockedUntil,
-            );
-
-            for (const nextEp of candidates) {
-              if (clientRef.value) break;
-              const fbStart = Date.now();
-              const ok = await runFallback(
-                req,
-                res,
-                fbParsedOriginal,
-                nextEp,
-                fallbackStreamId,
-                fallbackTagState,
-                fallbackKimiState,
-                clientRef,
-              );
-              if (ok) {
-                recordRequest(nextEp.model, Date.now() - fbStart, true, false);
-                fallbackOk = true;
-                break;
-              } else {
-                recordRequest(nextEp.model, Date.now() - fbStart, true, true);
-              }
-            }
-
-            if (!fallbackOk && !clientRef.value) {
-              console.log(`${ts()} [FALLBACK] Todos os modelos falharam.`);
-              await sendSyntheticChunk(res, fallbackStreamId, '[Todos os fallbacks falharam]', 'proxy');
-              // Emit a proper finish_reason chunk so the client doesn't wait
-              // forever for a stream terminator. Without this, some clients
-              // (including opencode) may hang expecting a finish_reason field.
-              if (!res.__poisoned) {
-                await writeSSE(
-                  res,
-                  'data: ' +
-                    JSON.stringify({
-                      id: fallbackStreamId,
-                      object: 'chat.completion.chunk',
-                      created: Math.floor(Date.now() / 1000),
-                      model: 'proxy',
-                      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                    }) +
-                    '\n\n',
-                );
-              }
-            }
-          } else if (kimiState.kimiFinishChunkBuf) {
-            // No fallback needed — emit the finish chunk we held back, then the
-            // [DONE] marker (also held back) in the correct order.
-            await writeSSE(res, kimiState.kimiFinishChunkBuf + '\n\n');
-            if (kimiState.kimiDoneBuf) await writeSSE(res, kimiState.kimiDoneBuf + '\n\n');
-          } else if (kimiState.kimiDoneBuf) {
-            await writeSSE(res, kimiState.kimiDoneBuf + '\n\n');
           }
 
           // ----- Finalize -----
@@ -639,15 +490,7 @@ export async function handleRequest(req, res) {
             if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
             res.end();
           }
-          // Record the primary endpoint. When a Kimi silent-fallback occurred,
-          // the primary did NOT actually answer the user — record it as an
-          // error so /metrics doesn't double-count a single user request as
-          // two successes (primary + fallback).
-          if (kimiState.kimiNeedsFallback && fallbackOk) {
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
-          } else {
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
-          }
+          recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
           requestComplete = true;
           break; // exit attempt loop
         } catch (fetchErr) {

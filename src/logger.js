@@ -17,16 +17,15 @@ const DIM = '\x1b[90m';
 /** Provider short labels for visual tags. */
 const PROVIDER_LABEL = { nvidia: 'NVDA' };
 
-/** Color per model slug (keeps the same palette as v1 for consistency). */
+/** Color per model slug. */
 function colorForModel(model) {
   if (model.includes('glm-5.2')) return (s) => `\x1b[36m${s}${RESET}`; // cyan
   if (model.includes('deepseek-v4-pro')) return (s) => `\x1b[34m${s}${RESET}`; // blue
-  if (model.includes('kimi-k2.6')) return (s) => `\x1b[35m${s}${RESET}`; // magenta
   if (model.includes('minimax-m3')) return (s) => `\x1b[31m${s}${RESET}`; // red
   return (s) => s;
 }
 
-/** Build the colored tag shown on every log line, e.g. `kimi-k2.6 [NVDA K1]`. */
+/** Build the colored tag shown on every log line, e.g. `glm-5.2 [NVDA K1]`. */
 export function visualTag(provider, model, keyIdx) {
   const slug = model.includes('/') ? model.split('/').pop() : model;
   const ptag = PROVIDER_LABEL[provider] || provider.toUpperCase();
