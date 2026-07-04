@@ -111,11 +111,38 @@ async function readBody(req) {
 }
 
 /**
- * Stream one upstream response into the client, applying normalization & tags.
- * @returns {Promise<void>}
+ * Check whether a parsed delta has any useful content (content, tool_calls,
+ * or reasoning_content — anything the client can actually use).
+ * @param {Record<string,any>} delta
+ * @returns {boolean}
  */
-async function pumpStream(response, res, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef) {
+function deltaHasUsefulContent(delta) {
+  if (!delta) return false;
+  if (typeof delta.content === 'string' && delta.content.trim() !== '') return true;
+  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
+  if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.trim() !== '') return true;
+  return false;
+}
+
+/**
+ * Stream one upstream response into the client, applying normalization & tags.
+ *
+ * Buffers chunks internally until the first useful content delta arrives.
+ * Only then does it call res.writeHead() and flush the buffer — so if the
+ * stream stalls or aborts before producing any useful content, the caller can
+ * silently fall back to the next cascade endpoint without the client noticing.
+ *
+ * @param {import('http').ServerResponse} res
+ * @param {Record<string,string>} resHeaders — upstream response headers (already
+ *   filtered of hop-by-hop). Only used if we actually writeHead.
+ * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean }>}
+ */
+async function pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef) {
   let sseBuffer = '';
+  let headersSent = false;
+  let hadUsefulContent = false;
+  /** @type {string[]} */
+  const pendingChunks = [];
   chunkTimer.reset();
 
   for await (let chunk of response.body) {
@@ -125,7 +152,6 @@ async function pumpStream(response, res, endpoint, tagState, controller, chunkTi
     if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
     sseBuffer += chunk.toString('utf-8');
 
-    // Split into complete events (keep the trailing partial in the buffer).
     const events = sseBuffer.split('\n\n');
     sseBuffer = events.pop() ?? '';
 
@@ -134,17 +160,34 @@ async function pumpStream(response, res, endpoint, tagState, controller, chunkTi
 
       eventStr = normalizeSSEEvent(eventStr);
       debug(`[NVIDIA -> PROXY] ${eventStr}`);
+
+      if (!headersSent) {
+        let parsed;
+        try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
+        const delta = parsed?.choices?.[0]?.delta;
+        if (deltaHasUsefulContent(delta)) {
+          headersSent = true;
+          hadUsefulContent = true;
+          res.writeHead(200, resHeaders);
+          for (const pending of pendingChunks) {
+            const alive = await writeSSE(res, pending);
+            if (!alive) { clientDisconnectedRef.value = true; break; }
+          }
+          pendingChunks.length = 0;
+        }
+      }
+
       const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
 
-      const alive = await writeSSE(res, taggedStr + '\n\n');
-      if (!alive) { clientDisconnectedRef.value = true; break; }
+      if (headersSent) {
+        const alive = await writeSSE(res, taggedStr + '\n\n');
+        if (!alive) { clientDisconnectedRef.value = true; break; }
+      } else {
+        pendingChunks.push(taggedStr + '\n\n');
+      }
     }
   }
 
-  // Flush any leftover partial event. Try JSON.parse first; if it fails,
-  // the frame is likely truncated mid-string. Log a warning and still send
-  // what we have — a malformed chunk is better than silently dropping data
-  // that the client (opencode) may be waiting for.
   if (sseBuffer.trim() && !clientDisconnectedRef.value) {
     const trimmed = sseBuffer.trim();
     if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
@@ -155,10 +198,34 @@ async function pumpStream(response, res, endpoint, tagState, controller, chunkTi
       }
       sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
+
+      if (!headersSent) {
+        let parsed;
+        try { parsed = JSON.parse(sseBuffer.substring(6).trim()); } catch { parsed = null; }
+        const delta = parsed?.choices?.[0]?.delta;
+        if (deltaHasUsefulContent(delta)) {
+          headersSent = true;
+          hadUsefulContent = true;
+          res.writeHead(200, resHeaders);
+          for (const pending of pendingChunks) {
+            const alive = await writeSSE(res, pending);
+            if (!alive) { clientDisconnectedRef.value = true; break; }
+          }
+          pendingChunks.length = 0;
+        }
+      }
+
       const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
-      await writeSSE(res, taggedStr + '\n\n');
+
+      if (headersSent) {
+        await writeSSE(res, taggedStr + '\n\n');
+      } else {
+        pendingChunks.push(taggedStr + '\n\n');
+      }
     }
   }
+
+  return { hadUsefulContent, headersSent };
 }
 
 /**
@@ -377,12 +444,12 @@ export async function handleRequest(req, res) {
           response.headers.forEach((v, k) => {
             if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
           });
-          res.writeHead(response.status, resHeaders);
 
           const tagState = newTagState();
 
+          let streamResult;
           try {
-            await pumpStream(response, res, endpoint, tagState, controller, chunkTimer, clientRef);
+            streamResult = await pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientRef);
           } catch (streamErr) {
             if (res.headersSent && !clientRef.value) {
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
@@ -391,6 +458,16 @@ export async function handleRequest(req, res) {
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
+          }
+
+          // If the stream produced no useful content AND we never sent headers,
+          // the client hasn't seen anything — fall through to the next cascade
+          // endpoint transparently.
+          if (streamResult && !streamResult.headersSent) {
+            console.log(`${ts()} [VAZIO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream sem conteúdo útil, tentando próximo.`);
+            attemptsLog[attemptsLog.length - 1] = `EMPTY ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            break; // exit attempt loop, continue cascadeLoop
           }
 
           // ----- Finalize -----
@@ -421,6 +498,9 @@ export async function handleRequest(req, res) {
           // We must emit an error chunk + finish_reason + [DONE] + end() so
           // the client (opencode) sees the stream terminate. Otherwise the
           // client hangs forever waiting for a response that never completes.
+          //
+          // If headers were NOT sent yet (buffering mode), the client hasn't
+          // seen anything — fall through to the next cascade endpoint silently.
           if (res.headersSent && !res.writableEnded && !clientRef.value) {
             console.log(`${ts()} [STREAM-FALHOU] Encerrando stream do cliente após abort.`);
             const errStreamId = 'chatcmpl-proxy-abort';
