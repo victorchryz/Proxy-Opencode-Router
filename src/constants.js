@@ -33,7 +33,7 @@ export const HOP_BY_HOP = new Set([
  * `[Fallback: ...]`. Used to strip stale tags from message content before
  * re-sending upstream (so the model doesn't see tags from a previous model).
  */
-export const TAG_RE = /\[Pensamento: [^\]]+\]\n*|\[Resposta: [^\]]+\]\n*|\[Fallback: [^\]]+\]\n*/g;
+export const TAG_RE = /\[Pensamento: [^\]]+\]|\[Resposta: [^\]]+\]|\[Fallback: [^\]]+\]/g;
 
 /**
  * Allowlist of opencode.jsonc option keys that are safe to forward to the

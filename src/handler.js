@@ -141,115 +141,23 @@ async function pumpStream(response, res, endpoint, tagState, controller, chunkTi
     }
   }
 
-  // Flush any leftover partial event — but only if it looks like a complete
-  // SSE frame (starts with "data: " and parses as JSON). Flushing a truncated
-  // frame would send malformed JSON to the client.
+  // Flush any leftover partial event. Try JSON.parse first; if it fails,
+  // the frame is likely truncated mid-string. Log a warning and still send
+  // what we have — a malformed chunk is better than silently dropping data
+  // that the client (opencode) may be waiting for.
   if (sseBuffer.trim() && !clientDisconnectedRef.value) {
     const trimmed = sseBuffer.trim();
     if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
       try {
         JSON.parse(trimmed.substring(6).trim());
-        sseBuffer = normalizeSSEEvent(sseBuffer);
-        debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
-        const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
-        await writeSSE(res, taggedStr + '\n\n');
       } catch {
-        // Partial JSON — discard rather than send malformed data.
-        debug(`[NVIDIA -> PROXY] (descartado frame parcial: ${trimmed.slice(0, 80)})`);
+        console.warn(`${ts()} [STREAM] Frame parcial (JSON inválido) — enviando mesmo assim.`);
       }
-    }
-  }
-}
-
-/**
- * Run a single fallback attempt against `nextEp` and stream it to the client.
- * @returns {Promise<boolean>} `true` if the fallback streamed successfully.
- */
-async function runFallback(req, res, parsedOriginal, nextEp, tagState, clientDisconnectedRef) {
-  const provider = PROVIDERS[nextEp.provider];
-  const fkIdx = nextEp.physicalKey;
-  const url = `${provider.baseUrl}${req.url}`;
-
-  const controller = new AbortController();
-  // connTimeoutMs: tempo desde fetch() até receber os HEADERS HTTP da NVIDIA.
-  // Limpo por clearTimeout(initialTimer) logo após fetch() resolver. NÃO
-  // mede stream nem "pensamento" pós-headers.
-  const initialTimer = setTimeout(
-    () => controller.abort(),
-    ENV.connTimeoutMs,
-  );
-  // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks. Reseta a
-  // cada chunk recebido. NÃO mede duração total — só aborta se ficar 90s
-  // sem receber NENHUM byte.
-  const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
-    console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados (fallback). Abortando...`);
-    controller.abort();
-  });
-
-  try {
-    const body = prepareBody(parsedOriginal, nextEp);
-    const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[fkIdx]);
-    console.log(`${ts()} [FALLBACK] -> ${visualTag(nextEp.provider, nextEp.model, fkIdx)}`);
-
-    const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
-    clearTimeout(initialTimer);
-
-    if (response.status >= 400) {
-      let errBody = '';
-      try { errBody = await response.text(); } catch { /* ignore */ }
-      console.warn(`${ts()} [FALLBACK] ${response.status} em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${errBody.slice(0, 150)}`);
-      applyBackoff(
-        getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`),
-        response.status,
-        errBody,
-        visualTag(nextEp.provider, nextEp.model, fkIdx),
-        response.headers,
-      );
-      return false;
-    }
-
-    getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
-
-    let sseBuffer = '';
-    chunkTimer.reset();
-
-    for await (let chunk of response.body) {
-      if (clientDisconnectedRef.value) break;
-      chunkTimer.reset();
-      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
-      sseBuffer += chunk.toString('utf-8');
-
-      const events = sseBuffer.split('\n\n');
-      sseBuffer = events.pop() ?? '';
-
-      for (let eventStr of events) {
-        if (!eventStr.trim()) continue;
-        eventStr = normalizeSSEEvent(eventStr);
-        debug(`[FALLBACK -> PROXY] ${eventStr}`);
-        const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
-        const alive = await writeSSE(res, taggedStr + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      }
-    }
-
-    if (sseBuffer.trim() && !clientDisconnectedRef.value) {
       sseBuffer = normalizeSSEEvent(sseBuffer);
-      debug(`[FALLBACK -> PROXY] ${sseBuffer}`);
-      const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
+      debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
+      const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
       await writeSSE(res, taggedStr + '\n\n');
     }
-
-    return true;
-  } catch (err) {
-    clearTimeout(initialTimer);
-    if (err?.name === 'AbortError') {
-      console.warn(`${ts()} [FALLBACK ABORT] Timeout em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}.`);
-    } else {
-      console.error(`${ts()} [FALLBACK FETCH] ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${err?.message ?? err}`);
-    }
-    return false;
-  } finally {
-    chunkTimer.clear();
   }
 }
 

@@ -402,3 +402,89 @@ onde se queira pós-processar a resposta antes de finalizá-la.
 
 O `replace` do `id` para manter continuidade do stream aos olhos do
 cliente é genérico e pode ser usado em qualquer fallback, não só Kimi.
+
+---
+
+## 7. `src/handler.js` — `runFallback` (função removida)
+
+A função `runFallback` era o motor de fallback silencioso: recebia um
+`nextEp` (modelo não-Kimi), fazia fetch, streamava a resposta com
+normalização e injeção de tags, e retornava `true`/`false`.
+
+Após a remoção do Kimi (v3.0.0), `runFallback` virou código morto —
+nunca chamada. Foi removida em v3.1.0.
+
+```js
+async function runFallback(req, res, parsedOriginal, nextEp, tagState, clientDisconnectedRef) {
+  const provider = PROVIDERS[nextEp.provider];
+  const fkIdx = nextEp.physicalKey;
+  const url = `${provider.baseUrl}${req.url}`;
+
+  const controller = new AbortController();
+  const initialTimer = setTimeout(() => controller.abort(), ENV.connTimeoutMs);
+  const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
+    console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados (fallback). Abortando...`);
+    controller.abort();
+  });
+
+  try {
+    const body = prepareBody(parsedOriginal, nextEp);
+    const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[fkIdx]);
+    console.log(`${ts()} [FALLBACK] -> ${visualTag(nextEp.provider, nextEp.model, fkIdx)}`);
+
+    const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+    clearTimeout(initialTimer);
+
+    if (response.status >= 400) {
+      let errBody = '';
+      try { errBody = await response.text(); } catch { /* ignore */ }
+      console.warn(`${ts()} [FALLBACK] ${response.status} em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${errBody.slice(0, 150)}`);
+      applyBackoff(getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`), response.status, errBody, visualTag(nextEp.provider, nextEp.model, fkIdx), response.headers);
+      return false;
+    }
+
+    getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
+
+    let sseBuffer = '';
+    chunkTimer.reset();
+
+    for await (let chunk of response.body) {
+      if (clientDisconnectedRef.value) break;
+      chunkTimer.reset();
+      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
+      sseBuffer += chunk.toString('utf-8');
+
+      const events = sseBuffer.split('\n\n');
+      sseBuffer = events.pop() ?? '';
+
+      for (let eventStr of events) {
+        if (!eventStr.trim()) continue;
+        eventStr = normalizeSSEEvent(eventStr);
+        debug(`[FALLBACK -> PROXY] ${eventStr}`);
+        const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
+        const alive = await writeSSE(res, taggedStr + '\n\n');
+        if (!alive) { clientDisconnectedRef.value = true; break; }
+      }
+    }
+
+    if (sseBuffer.trim() && !clientDisconnectedRef.value) {
+      sseBuffer = normalizeSSEEvent(sseBuffer);
+      debug(`[FALLBACK -> PROXY] ${sseBuffer}`);
+      const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
+      await writeSSE(res, taggedStr + '\n\n');
+    }
+
+    return true;
+  } catch (err) {
+    clearTimeout(initialTimer);
+    if (err?.name === 'AbortError') {
+      console.warn(`${ts()} [FALLBACK ABORT] Timeout em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}.`);
+    } else {
+      console.error(`${ts()} [FALLBACK FETCH] ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${err?.message ?? err}`);
+    }
+    return false;
+  } finally {
+    chunkTimer.clear();
+  }
+}
+```
