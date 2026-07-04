@@ -435,7 +435,7 @@ export async function handleRequest(req, res) {
           }
 
           // ----- Success: stream the response -----
-          setLastUsedModel(endpoint.name);
+          setLastUsedModel(endpoint.name, kIdx);
           state.backoffIndex = 0;
           attemptsLog.push(`OK ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 

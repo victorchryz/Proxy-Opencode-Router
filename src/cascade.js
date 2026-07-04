@@ -22,10 +22,16 @@ const DEFAULT_ORDER = Object.keys(MODEL_MAP);
 let _globalKeyToggle = 1;
 export function getGlobalKeyToggle() { return _globalKeyToggle; }
 
-// Tracks the last model that responded successfully (anti-repetition).
+// Tracks the last model+key that responded successfully (anti-repetition).
+// Per-key: only skip the model on the SAME key it was last used on — different
+// keys have independent quotas, so using DS on K2 shouldn't block DS on K1.
 let _lastUsedModel = null;
+let _lastUsedKey = null;
 export function getLastUsedModel() { return _lastUsedModel; }
-export function setLastUsedModel(v) { _lastUsedModel = v; }
+export function setLastUsedModel(name, keyIdx) {
+  _lastUsedModel = name;
+  _lastUsedKey = keyIdx;
+}
 
 /** Look up a model definition by short slug. */
 function getModelDef(name) {
@@ -57,7 +63,7 @@ export function buildDynamicCascade(provider) {
     DEFAULT_ORDER
       .map(getModelDef)
       .filter(Boolean)
-      .filter((m) => m.name !== _lastUsedModel)
+      .filter((m) => !(m.name === _lastUsedModel && keyIdx === _lastUsedKey))
       .filter((m) => {
         const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
         return now >= s.blockedUntil;
