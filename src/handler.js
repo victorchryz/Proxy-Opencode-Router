@@ -141,54 +141,69 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
   let sseBuffer = '';
   let headersSent = false;
   let hadUsefulContent = false;
+  let stalled = false;
+  let streamId = null;
   /** @type {string[]} */
   const pendingChunks = [];
   chunkTimer.reset();
 
-  for await (let chunk of response.body) {
-    if (clientDisconnectedRef.value) break;
-    chunkTimer.reset();
+  try {
+    for await (let chunk of response.body) {
+      if (clientDisconnectedRef.value) break;
+      chunkTimer.reset();
 
-    if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
-    sseBuffer += chunk.toString('utf-8');
+      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
+      sseBuffer += chunk.toString('utf-8');
 
-    const events = sseBuffer.split('\n\n');
-    sseBuffer = events.pop() ?? '';
+      const events = sseBuffer.split('\n\n');
+      sseBuffer = events.pop() ?? '';
 
-    for (let eventStr of events) {
-      if (!eventStr.trim()) continue;
+      for (let eventStr of events) {
+        if (!eventStr.trim()) continue;
 
-      eventStr = normalizeSSEEvent(eventStr);
-      debug(`[NVIDIA -> PROXY] ${eventStr}`);
+        eventStr = normalizeSSEEvent(eventStr);
+        debug(`[NVIDIA -> PROXY] ${eventStr}`);
 
-      if (!headersSent) {
-        let parsed;
-        try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
-        const delta = parsed?.choices?.[0]?.delta;
-        if (deltaHasUsefulContent(delta)) {
-          headersSent = true;
-          hadUsefulContent = true;
-          res.writeHead(200, resHeaders);
-          for (const pending of pendingChunks) {
-            const alive = await writeSSE(res, pending);
-            if (!alive) { clientDisconnectedRef.value = true; break; }
+        if (!streamId) {
+          const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
+          if (idMatch) streamId = idMatch[1];
+        }
+
+        if (!headersSent) {
+          let parsed;
+          try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
+          const delta = parsed?.choices?.[0]?.delta;
+          if (deltaHasUsefulContent(delta)) {
+            headersSent = true;
+            hadUsefulContent = true;
+            res.writeHead(200, resHeaders);
+            for (const pending of pendingChunks) {
+              const alive = await writeSSE(res, pending);
+              if (!alive) { clientDisconnectedRef.value = true; break; }
+            }
+            pendingChunks.length = 0;
           }
-          pendingChunks.length = 0;
+        }
+
+        const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
+
+        if (headersSent) {
+          const alive = await writeSSE(res, taggedStr + '\n\n');
+          if (!alive) { clientDisconnectedRef.value = true; break; }
+        } else {
+          pendingChunks.push(taggedStr + '\n\n');
         }
       }
-
-      const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
-
-      if (headersSent) {
-        const alive = await writeSSE(res, taggedStr + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      } else {
-        pendingChunks.push(taggedStr + '\n\n');
-      }
+    }
+  } catch (streamErr) {
+    if (streamErr?.name === 'AbortError' && headersSent) {
+      stalled = true;
+    } else {
+      throw streamErr;
     }
   }
 
-  if (sseBuffer.trim() && !clientDisconnectedRef.value) {
+  if (!stalled && sseBuffer.trim() && !clientDisconnectedRef.value) {
     const trimmed = sseBuffer.trim();
     if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
       try {
@@ -198,6 +213,11 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
       }
       sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
+
+      if (!streamId) {
+        const idMatch = sseBuffer.match(/"id"\s*:\s*"([^"]+)"/);
+        if (idMatch) streamId = idMatch[1];
+      }
 
       if (!headersSent) {
         let parsed;
@@ -225,7 +245,87 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     }
   }
 
-  return { hadUsefulContent, headersSent };
+  return { hadUsefulContent, headersSent, stalled, streamId };
+}
+
+async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientDisconnectedRef) {
+  const provider = PROVIDERS[nextEp.provider];
+  const fkIdx = nextEp.physicalKey;
+  const url = `${provider.baseUrl}${req.url}`;
+
+  const controller = new AbortController();
+  const initialTimer = setTimeout(() => controller.abort(), ENV.connTimeoutMs);
+  const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
+    console.warn(`${ts()} [STALL-FALLBACK] ${ENV.streamTimeoutMs}ms sem dados. Abortando...`);
+    controller.abort();
+  });
+
+  try {
+    const body = prepareBody(parsedOriginal, nextEp);
+    const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[fkIdx]);
+    console.log(`${ts()} [STALL-FALLBACK] -> ${visualTag(nextEp.provider, nextEp.model, fkIdx)}`);
+
+    const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+    clearTimeout(initialTimer);
+
+    if (response.status >= 400) {
+      let errBody = '';
+      try { errBody = await response.text(); } catch { /* ignore */ }
+      console.warn(`${ts()} [STALL-FALLBACK] ${response.status} em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${errBody.slice(0, 150)}`);
+      applyBackoff(getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`), response.status, errBody, visualTag(nextEp.provider, nextEp.model, fkIdx), response.headers);
+      return false;
+    }
+
+    getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
+
+    const tagState = newTagState();
+    let sseBuffer = '';
+    chunkTimer.reset();
+
+    for await (let chunk of response.body) {
+      if (clientDisconnectedRef.value) break;
+      chunkTimer.reset();
+      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
+      sseBuffer += chunk.toString('utf-8');
+
+      const events = sseBuffer.split('\n\n');
+      sseBuffer = events.pop() ?? '';
+
+      for (let eventStr of events) {
+        if (!eventStr.trim()) continue;
+        eventStr = normalizeSSEEvent(eventStr);
+        debug(`[STALL-FALLBACK -> PROXY] ${eventStr}`);
+        const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
+        const out = stallStreamId
+          ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
+          : taggedStr;
+        const alive = await writeSSE(res, out + '\n\n');
+        if (!alive) { clientDisconnectedRef.value = true; break; }
+      }
+    }
+
+    if (sseBuffer.trim() && !clientDisconnectedRef.value) {
+      sseBuffer = normalizeSSEEvent(sseBuffer);
+      debug(`[STALL-FALLBACK -> PROXY] ${sseBuffer}`);
+      const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
+      const out = stallStreamId
+        ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
+        : taggedStr;
+      await writeSSE(res, out + '\n\n');
+    }
+
+    return true;
+  } catch (err) {
+    clearTimeout(initialTimer);
+    if (err?.name === 'AbortError') {
+      console.warn(`${ts()} [STALL-FALLBACK] Timeout em ${visualTag(nextEp.provider, nextEp.model, fkIdx)}.`);
+    } else {
+      console.error(`${ts()} [STALL-FALLBACK] ${visualTag(nextEp.provider, nextEp.model, fkIdx)}: ${err?.message ?? err}`);
+    }
+    return false;
+  } finally {
+    chunkTimer.clear();
+  }
 }
 
 /**
@@ -323,6 +423,9 @@ export async function handleRequest(req, res) {
 
     let requestComplete = false;
     let abortCascade = false;
+    let stalledAfterHeaders = false;
+    let stallStreamId = null;
+    let stalledEndpoint = null;
 
     cascadeLoop: for (const endpoint of cascade) {
       const provider = PROVIDERS[endpoint.provider];
@@ -456,6 +559,7 @@ export async function handleRequest(req, res) {
               throw streamErr;
             }
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
+            streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null };
           } finally {
             chunkTimer.clear();
           }
@@ -467,6 +571,16 @@ export async function handleRequest(req, res) {
             console.log(`${ts()} [VAZIO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream sem conteúdo útil, tentando próximo.`);
             attemptsLog[attemptsLog.length - 1] = `EMPTY ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
             recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            break; // exit attempt loop, continue cascadeLoop
+          }
+
+          if (streamResult && streamResult.stalled && streamResult.headersSent) {
+            console.log(`${ts()} [STALL] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream estalou, tentando fallback...`);
+            attemptsLog[attemptsLog.length - 1] = `STALL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            stallStreamId = streamResult.streamId;
+            stalledEndpoint = endpoint;
+            stalledAfterHeaders = true;
             break; // exit attempt loop, continue cascadeLoop
           }
 
@@ -538,12 +652,45 @@ export async function handleRequest(req, res) {
         }
       } // attempt loop
 
-      if (requestComplete || clientRef.value || abortCascade) break cascadeLoop;
+      if (requestComplete || clientRef.value || abortCascade || stalledAfterHeaders) break cascadeLoop;
     } // cascadeLoop
 
     if (!clientRef.value) {
       const total = ((Date.now() - requestStartTime) / 1000).toFixed(2);
       console.log(`${ts()} [RESUMO] ${attemptsLog.join(' -> ')} | ${total}s`);
+    }
+
+    if (stalledAfterHeaders && !clientRef.value) {
+      const remaining = cascade.filter(
+        (ep) =>
+          ep !== stalledEndpoint &&
+          Date.now() >= getState(`${ep.provider}:${ep.model}__${ep.physicalKey}`).blockedUntil,
+      );
+
+      let fallbackOk = false;
+      for (const nextEp of remaining) {
+        if (clientRef.value) break;
+        await enforceTimeLimit();
+        const fbStart = Date.now();
+        const ok = await runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientRef);
+        if (ok) {
+          attemptsLog.push(`OK ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
+          recordRequest(nextEp.model, Date.now() - fbStart, false, false);
+          fallbackOk = true;
+          break;
+        } else {
+          attemptsLog.push(`FAIL ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
+          recordRequest(nextEp.model, Date.now() - fbStart, false, true);
+        }
+      }
+
+      if (fallbackOk) {
+        if (!res.writableEnded) {
+          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+          res.end();
+        }
+        requestComplete = true;
+      }
     }
 
     // Every endpoint failed without aborting — emit a synthetic SSE stream
