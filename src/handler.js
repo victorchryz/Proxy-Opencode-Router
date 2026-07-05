@@ -690,6 +690,26 @@ export async function handleRequest(req, res) {
           res.end();
         }
         requestComplete = true;
+      } else if (!clientRef.value) {
+        const stallErrId = stallStreamId || 'chatcmpl-proxy-stall';
+        try {
+          await writeSSE(res, 'data: ' + JSON.stringify({
+            id: stallErrId, object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000), model: 'proxy',
+            choices: [{ delta: { content: '\n\n[Stream interrompido — todos os fallbacks falharam]' }, index: 0, finish_reason: null }],
+          }) + '\n\n');
+          await writeSSE(res, 'data: ' + JSON.stringify({
+            id: stallErrId, object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000), model: 'proxy',
+            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+          }) + '\n\n');
+          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+          res.end();
+        } catch (e) {
+          console.warn(`${ts()} [STALL-FALHOU] Erro ao encerrar: ${e.message}`);
+          try { res.destroy(); } catch { /* ignore */ }
+        }
+        requestComplete = true;
       }
     }
 
