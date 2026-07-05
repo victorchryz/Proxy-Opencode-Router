@@ -15,7 +15,7 @@ import {
   earliestUnblockMs,
   activeCount,
 } from './state.js';
-import { buildDynamicCascade, setLastUsedModel } from './cascade.js';
+import { buildDynamicCascade, buildCascadeForKey, setLastUsedModel } from './cascade.js';
 import {
   normalizeSSEEvent,
   injectModelTag,
@@ -416,244 +416,202 @@ export async function handleRequest(req, res) {
   const attemptsLog = [];
 
   try {
-    const cascade = buildDynamicCascade(PROVIDERS.nvidia);
-    console.log(
-      `${ts()} [PLANO] ${cascade.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
-    );
-
     let requestComplete = false;
     let abortCascade = false;
     let stalledAfterHeaders = false;
     let stallStreamId = null;
     let stalledEndpoint = null;
 
-    cascadeLoop: for (const endpoint of cascade) {
-      const provider = PROVIDERS[endpoint.provider];
-      if (!provider || provider.keys.length === 0) continue cascadeLoop;
+    const runCascadeBatch = async (cascade, batchLabel) => {
+      for (const endpoint of cascade) {
+        const provider = PROVIDERS[endpoint.provider];
+        if (!provider || provider.keys.length === 0) continue;
 
-      const kIdx = endpoint.physicalKey;
-      const state = getState(`${endpoint.provider}:${endpoint.model}__${kIdx}`);
-      if (Date.now() < state.blockedUntil) {
-        const rem = Math.ceil((state.blockedUntil - Date.now()) / 1000);
-        attemptsLog.push(`SKIP ${visualTag(endpoint.provider, endpoint.model, kIdx)}[${rem}s]`);
-        continue cascadeLoop;
-      }
+        const kIdx = endpoint.physicalKey;
+        const state = getState(`${endpoint.provider}:${endpoint.model}__${kIdx}`);
+        if (Date.now() < state.blockedUntil) {
+          const rem = Math.ceil((state.blockedUntil - Date.now()) / 1000);
+          attemptsLog.push(`SKIP ${visualTag(endpoint.provider, endpoint.model, kIdx)}[${rem}s]`);
+          continue;
+        }
 
-      if (endpoint !== cascade[0]) {
-        console.log(`${ts()} [CASCATA] Roteando para ${visualTag(endpoint.provider, endpoint.model, kIdx)}...`);
-      }
+        if (endpoint !== cascade[0]) {
+          console.log(`${ts()} [CASCATA] Roteando para ${visualTag(endpoint.provider, endpoint.model, kIdx)}...`);
+        }
 
-      // Per-endpoint retry budget. We only retry on NETWORK errors that happen
-      // BEFORE we get any upstream response (e.g. DNS failure, connection
-      // refused). Once we've received headers — even a 200 that later stalls
-      // mid-stream — we do NOT retry the same endpoint: that would loop for
-      // 2×stream_timeout on every hung connection and multiply the failure
-      // latency. Instead we abort and move to the next endpoint in the cascade.
-      let gotResponseHeaders = false;
+        let gotResponseHeaders = false;
 
-      for (let attempt = 1; attempt <= 2 && !requestComplete && !clientRef.value; attempt++) {
-        await enforceTimeLimit();
+        for (let attempt = 1; attempt <= 2 && !requestComplete && !clientRef.value; attempt++) {
+          await enforceTimeLimit();
 
-        const controller = new AbortController();
-        clientRef.controller = controller;
-        // connTimeoutMs: tempo desde o disparo de fetch() até receber os
-        // HEADERS HTTP da NVIDIA (status + headers). Limpo por
-        // clearTimeout(initialTimer) logo após fetch() resolver. NÃO mede
-        // stream, NÃO mede "pensamento" pós-headers — só o handshake inicial
-        // (TCP+TLS+processamento upstream até o primeiro byte de resposta).
-        const initialTimer = setTimeout(() => {
-          console.warn(`${ts()} [TIMEOUT] ${ENV.connTimeoutMs}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
-          controller.abort();
-        }, ENV.connTimeoutMs);
+          const controller = new AbortController();
+          clientRef.controller = controller;
+          const initialTimer = setTimeout(() => {
+            console.warn(`${ts()} [TIMEOUT] ${ENV.connTimeoutMs}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
+            controller.abort();
+          }, ENV.connTimeoutMs);
 
-        // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks do
-        // stream SSE. Reseta a cada chunk recebido via chunkTimer.reset().
-        // NÃO mede duração total do stream — só aborta se ficar 90s sem
-        // receber NENHUM byte. Stream lento mas contínuo NUNCA aborta.
-        const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
-          console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados! Abortando...`);
-          controller.abort();
-        });
-
-        const attemptStart = Date.now();
-        try {
-          const url = `${provider.baseUrl}${req.url}`;
-          const body = prepareBody(parsedOriginal, endpoint);
-          const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[kIdx]);
-          console.log(`${ts()} [INÍCIO] -> ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-
-          const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
-          clearTimeout(initialTimer);
-          gotResponseHeaders = true; // we got *some* response — don't retry this endpoint on stream errors
-          console.log(
-            `${ts()} [RESPOSTA] Status ${response.status} em ${((Date.now() - attemptStart) / 1000).toFixed(2)}s`,
-          );
-
-          // ----- Upstream error -----
-          if (response.status >= 400) {
-            chunkTimer.clear();
-            let errBody = '';
-            try { errBody = await response.text(); } catch { /* ignore */ }
-            console.warn(
-              `${ts()} [ERRO] ${response.status} em ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${errBody.slice(0, 150)}`,
-            );
-            abortCascade = applyBackoff(
-              state,
-              response.status,
-              errBody,
-              visualTag(endpoint.provider, endpoint.model, kIdx),
-              response.headers,
-            );
-            attemptsLog.push(`FAIL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
-
-            if (abortCascade) {
-              if (!res.headersSent) {
-                const wantsStream = parsedOriginal?.stream !== false;
-                if (wantsStream) {
-                  const abortStreamId = 'chatcmpl-proxy-abort';
-                  res.writeHead(200, {
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                  });
-                  const abortMsg = `\n[Proxy: erro ${response.status} — requisição inválida, não retriable]`;
-                  await sendSyntheticChunk(res, abortStreamId, abortMsg);
-                  await writeSSE(res, 'data: ' + JSON.stringify({
-                    id: abortStreamId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model: 'proxy',
-                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                  }) + '\n\n');
-                  if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-                  res.end();
-                } else {
-                  res.writeHead(response.status, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ error: { message: errBody, type: 'proxy_abort_error' } }));
-                }
-              }
-              requestComplete = true;
-            }
-            // Either way, this endpoint is done — try the next one (or break).
-            break; // exit attempt loop, continue cascadeLoop
-          }
-
-          // ----- Success: stream the response -----
-          setLastUsedModel(endpoint.name, kIdx);
-          state.backoffIndex = 0;
-          attemptsLog.push(`OK ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-
-          /** @type {Record<string, string>} */
-          const resHeaders = {};
-          response.headers.forEach((v, k) => {
-            if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
+          const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
+            console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados! Abortando...`);
+            controller.abort();
           });
 
-          const tagState = newTagState();
-
-          let streamResult;
+          const attemptStart = Date.now();
           try {
-            streamResult = await pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientRef);
-          } catch (streamErr) {
-            if (res.headersSent && !clientRef.value) {
-              console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
-              throw streamErr;
+            const url = `${provider.baseUrl}${req.url}`;
+            const body = prepareBody(parsedOriginal, endpoint);
+            const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[kIdx]);
+            console.log(`${ts()} [INÍCIO] -> ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
+
+            const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+            clearTimeout(initialTimer);
+            gotResponseHeaders = true;
+            console.log(
+              `${ts()} [RESPOSTA] Status ${response.status} em ${((Date.now() - attemptStart) / 1000).toFixed(2)}s`,
+            );
+
+            if (response.status >= 400) {
+              chunkTimer.clear();
+              let errBody = '';
+              try { errBody = await response.text(); } catch { /* ignore */ }
+              console.warn(
+                `${ts()} [ERRO] ${response.status} em ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${errBody.slice(0, 150)}`,
+              );
+              abortCascade = applyBackoff(
+                state,
+                response.status,
+                errBody,
+                visualTag(endpoint.provider, endpoint.model, kIdx),
+                response.headers,
+              );
+              attemptsLog.push(`FAIL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
+              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+
+              if (abortCascade) {
+                if (res.headersSent) {
+                  requestComplete = true;
+                }
+              }
+              break;
             }
-            console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
-            streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null };
-          } finally {
-            chunkTimer.clear();
-          }
 
-          // If the stream produced no useful content AND we never sent headers,
-          // the client hasn't seen anything — fall through to the next cascade
-          // endpoint transparently.
-          if (streamResult && !streamResult.headersSent) {
-            console.log(`${ts()} [VAZIO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream sem conteúdo útil, tentando próximo.`);
-            attemptsLog[attemptsLog.length - 1] = `EMPTY ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
-            break; // exit attempt loop, continue cascadeLoop
-          }
+            setLastUsedModel(endpoint.name);
+            state.backoffIndex = 0;
+            attemptsLog.push(`OK ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 
-          if (streamResult && streamResult.stalled && streamResult.headersSent) {
-            console.log(`${ts()} [STALL] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream estalou, tentando fallback...`);
-            attemptsLog[attemptsLog.length - 1] = `STALL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
-            stallStreamId = streamResult.streamId;
-            stalledEndpoint = endpoint;
-            stalledAfterHeaders = true;
-            break; // exit attempt loop, continue cascadeLoop
-          }
+            /** @type {Record<string, string>} */
+            const resHeaders = {};
+            response.headers.forEach((v, k) => {
+              if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
+            });
 
-          // ----- Finalize -----
-          if (!res.writableEnded) {
-            if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-            res.end();
-          }
-          recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
-          requestComplete = true;
-          break; // exit attempt loop
-        } catch (fetchErr) {
-          clearTimeout(initialTimer);
-          chunkTimer.clear();
-          const isAbort = fetchErr?.name === 'AbortError';
-          if (isAbort) {
-            if (!clientRef.value) {
-              console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
-            }
-          } else {
-            console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);
-          }
-          attemptsLog.push(`NET ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-          recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            const tagState = newTagState();
 
-          // CRITICAL: if we already started streaming to the client (headers
-          // sent), we cannot retry the same endpoint NOR silently move to the
-          // next cascade endpoint — the client is waiting for stream closure.
-          // We must emit an error chunk + finish_reason + [DONE] + end() so
-          // the client (opencode) sees the stream terminate. Otherwise the
-          // client hangs forever waiting for a response that never completes.
-          //
-          // If headers were NOT sent yet (buffering mode), the client hasn't
-          // seen anything — fall through to the next cascade endpoint silently.
-          if (res.headersSent && !res.writableEnded && !clientRef.value) {
-            console.log(`${ts()} [STREAM-FALHOU] Encerrando stream do cliente após abort.`);
-            const errStreamId = 'chatcmpl-proxy-abort';
+            let streamResult;
             try {
-              await writeSSE(res, 'data: ' + JSON.stringify({
-                id: errStreamId, object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000), model: 'proxy',
-                choices: [{ delta: { content: '\n\n[Stream interrompido por timeout]' }, index: 0, finish_reason: null }],
-              }) + '\n\n');
-              await writeSSE(res, 'data: ' + JSON.stringify({
-                id: errStreamId, object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000), model: 'proxy',
-                choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-              }) + '\n\n');
+              streamResult = await pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientRef);
+            } catch (streamErr) {
+              if (res.headersSent && !clientRef.value) {
+                console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
+                throw streamErr;
+              }
+              console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
+              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null };
+            } finally {
+              chunkTimer.clear();
+            }
+
+            if (streamResult && !streamResult.headersSent) {
+              console.log(`${ts()} [VAZIO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream sem conteúdo útil, tentando próximo.`);
+              attemptsLog[attemptsLog.length - 1] = `EMPTY ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+              break;
+            }
+
+            if (streamResult && streamResult.stalled && streamResult.headersSent) {
+              console.log(`${ts()} [STALL] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream estalou, tentando fallback...`);
+              attemptsLog[attemptsLog.length - 1] = `STALL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+              stallStreamId = streamResult.streamId;
+              stalledEndpoint = endpoint;
+              stalledAfterHeaders = true;
+              break;
+            }
+
+            if (!res.writableEnded) {
               if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
               res.end();
-            } catch (e) {
-              console.warn(`${ts()} [STREAM-FALHOU] Erro ao encerrar: ${e.message}`);
-              try { res.destroy(); } catch { /* ignore */ }
             }
+            recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
             requestComplete = true;
-            break; // exit attempt loop, will break cascadeLoop below
-          }
+            break;
+          } catch (fetchErr) {
+            clearTimeout(initialTimer);
+            chunkTimer.clear();
+            const isAbort = fetchErr?.name === 'AbortError';
+            if (isAbort) {
+              if (!clientRef.value) {
+                console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
+              }
+            } else {
+              console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);
+            }
+            attemptsLog.push(`NET ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
+            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
 
-          // Timeouts (AbortError) are NOT retried — a stream stall or connection
-          // timeout usually means the upstream is unhealthy; retrying the same
-          // endpoint just doubles the latency before we move to the next cascade
-          // candidate. Only fast network errors (ECONNREFUSED, DNS, etc.) get
-          // the retry budget. This prevents the "loop" where every hung endpoint
-          // burns 2 × stream_timeout before falling through.
-          if (isAbort) {
-            break; // exit attempt loop, continue cascadeLoop
+            if (res.headersSent && !res.writableEnded && !clientRef.value) {
+              console.log(`${ts()} [STREAM-FALHOU] Encerrando stream do cliente após abort.`);
+              const errStreamId = 'chatcmpl-proxy-abort';
+              try {
+                await writeSSE(res, 'data: ' + JSON.stringify({
+                  id: errStreamId, object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000), model: 'proxy',
+                  choices: [{ delta: { content: '\n\n[Stream interrompido por timeout]' }, index: 0, finish_reason: null }],
+                }) + '\n\n');
+                await writeSSE(res, 'data: ' + JSON.stringify({
+                  id: errStreamId, object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000), model: 'proxy',
+                  choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+                }) + '\n\n');
+                if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+                res.end();
+              } catch (e) {
+                console.warn(`${ts()} [STREAM-FALHOU] Erro ao encerrar: ${e.message}`);
+                try { res.destroy(); } catch { /* ignore */ }
+              }
+              requestComplete = true;
+              break;
+            }
+
+            if (isAbort) {
+              break;
+            }
           }
-          // Non-abort network error: retry if attempts remain (loop continues).
         }
-      } // attempt loop
 
-      if (requestComplete || clientRef.value || abortCascade || stalledAfterHeaders) break cascadeLoop;
-    } // cascadeLoop
+        if (requestComplete || clientRef.value || abortCascade || stalledAfterHeaders) return;
+      }
+    };
+
+    const cascade1 = buildDynamicCascade(PROVIDERS.nvidia);
+    console.log(
+      `${ts()} [PLANO] ${cascade1.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
+    );
+
+    await runCascadeBatch(cascade1, 'K1');
+
+    if (!requestComplete && !res.headersSent && !clientRef.value && !stalledAfterHeaders) {
+      const usedKey = cascade1[0]?.physicalKey;
+      const otherKey = (usedKey + 1) % PROVIDERS.nvidia.keys.length;
+      const cascade2 = buildCascadeForKey(PROVIDERS.nvidia.keys, otherKey);
+      if (cascade2.length > 0) {
+        console.log(
+          `${ts()} [PLANO-K2] ${cascade2.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
+        );
+        abortCascade = false;
+        await runCascadeBatch(cascade2, 'K2');
+      }
+    }
 
     if (!clientRef.value) {
       const total = ((Date.now() - requestStartTime) / 1000).toFixed(2);
@@ -661,15 +619,24 @@ export async function handleRequest(req, res) {
     }
 
     if (stalledAfterHeaders && !clientRef.value) {
-      const remaining = cascade.filter(
-        (ep) =>
-          ep !== stalledEndpoint &&
-          Date.now() >= getState(`${ep.provider}:${ep.model}__${ep.physicalKey}`).blockedUntil,
+      const stalledKey = stalledEndpoint.physicalKey;
+      const otherKey = (stalledKey + 1) % PROVIDERS.nvidia.keys.length;
+      const sameKey = buildCascadeForKey(PROVIDERS.nvidia.keys, stalledKey).filter(
+        (ep) => ep !== stalledEndpoint,
       );
+      const otherKeyEps = PROVIDERS.nvidia.keys.length > 1
+        ? buildCascadeForKey(PROVIDERS.nvidia.keys, otherKey)
+        : [];
+      const remaining = [...sameKey, ...otherKeyEps];
 
       let fallbackOk = false;
+      let triedOtherKey = false;
       for (const nextEp of remaining) {
         if (clientRef.value) break;
+        if (!triedOtherKey && nextEp.physicalKey !== stalledKey) {
+          console.log(`${ts()} [STALL-FALLBACK-K2] Tentando outra key...`);
+          triedOtherKey = true;
+        }
         await enforceTimeLimit();
         const fbStart = Date.now();
         const ok = await runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientRef);

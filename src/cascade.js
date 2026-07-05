@@ -22,15 +22,14 @@ const DEFAULT_ORDER = Object.keys(MODEL_MAP);
 let _globalKeyToggle = 1;
 export function getGlobalKeyToggle() { return _globalKeyToggle; }
 
-// Tracks the last model+key that responded successfully (anti-repetition).
-// Per-key: only skip the model on the SAME key it was last used on — different
-// keys have independent quotas, so using DS on K2 shouldn't block DS on K1.
+// Tracks the last model that responded successfully (anti-repetition).
+// Rebaixa-para-segundo: lastUsedModel desce para a 2ª posição da ordem fixa.
+// GLM usado → [DS, GLM, MM] | DS usado → [GLM, DS, MM] | MM usado → [GLM, MM, DS]
+// Se o 2º falhar, tenta o último usado de novo (se não bloqueado).
 let _lastUsedModel = null;
-let _lastUsedKey = null;
 export function getLastUsedModel() { return _lastUsedModel; }
-export function setLastUsedModel(name, keyIdx) {
+export function setLastUsedModel(name) {
   _lastUsedModel = name;
-  _lastUsedKey = keyIdx;
 }
 
 /** Look up a model definition by short slug. */
@@ -39,16 +38,46 @@ function getModelDef(name) {
   return base ? { ...base, name } : null;
 }
 
+/** Reordena DEFAULT_ORDER rebaixando lastUsedModel para a 2ª posição. */
+function reorderForAntiRepetition() {
+  if (!_lastUsedModel || DEFAULT_ORDER.length <= 2) return DEFAULT_ORDER;
+  const idx = DEFAULT_ORDER.indexOf(_lastUsedModel);
+  if (idx === -1) return DEFAULT_ORDER;
+  const others = DEFAULT_ORDER.filter((n) => n !== _lastUsedModel);
+  return [others[0], _lastUsedModel, ...others.slice(1)];
+}
+
+/**
+ * Coleta endpoints disponíveis para uma key específica, filtrando bloqueados.
+ * @param {string[]} keys
+ * @param {number} keyIdx
+ * @returns {CascadeEndpoint[]}
+ */
+export function buildCascadeForKey(keys, keyIdx) {
+  const now = Date.now();
+  const order = reorderForAntiRepetition();
+  return order
+    .map(getModelDef)
+    .filter(Boolean)
+    .filter((m) => {
+      const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
+      return now >= s.blockedUntil;
+    })
+    .map((m) => ({ ...m, physicalKey: keyIdx }));
+}
+
 /**
  * Build the cascade for the next request.
  *
  * - Alternates K1↔K2 via globalKeyToggle.
- * - Walks DEFAULT_ORDER (GLM → DS → MM) skipping:
- *     1. lastUsedModel (anti-repetition)
- *     2. models blocked on the start key
- * - If nothing available on start key, tries the other key (same priority).
- * - If nothing available on either key, absolute fallback: GLM on start key
- *   ignoring blocks.
+ * - Rebaixa lastUsedModel para a 2ª posição da ordem fixa (GLM→DS→MM):
+ *     GLM usado → [DS, GLM, MM]
+ *     DS usado  → [GLM, DS, MM]
+ *     MM usado  → [GLM, MM, DS]
+ * - Filtra modelos bloqueados na key atual.
+ * - Se nada disponível na key inicial, tenta a outra key (mesma ordem).
+ * - Se nada disponível em nenhuma key, absolute fallback: GLM na key inicial
+ *   ignorando blocks.
  *
  * @param {{ keys: string[] }} provider
  * @returns {CascadeEndpoint[]}
@@ -57,23 +86,11 @@ export function buildDynamicCascade(provider) {
   _globalKeyToggle = (_globalKeyToggle + 1) % provider.keys.length;
   const startKey = _globalKeyToggle;
   const otherKey = (startKey + 1) % provider.keys.length;
-  const now = Date.now();
 
-  const collect = (keyIdx) =>
-    DEFAULT_ORDER
-      .map(getModelDef)
-      .filter(Boolean)
-      .filter((m) => !(m.name === _lastUsedModel && keyIdx === _lastUsedKey))
-      .filter((m) => {
-        const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
-        return now >= s.blockedUntil;
-      })
-      .map((m) => ({ ...m, physicalKey: keyIdx }));
-
-  let cascade = collect(startKey);
+  let cascade = buildCascadeForKey(provider.keys, startKey);
 
   if (cascade.length === 0 && provider.keys.length > 1) {
-    cascade = collect(otherKey);
+    cascade = buildCascadeForKey(provider.keys, otherKey);
   }
 
   if (cascade.length === 0) {
