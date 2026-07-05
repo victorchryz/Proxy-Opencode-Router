@@ -23,9 +23,7 @@ let _globalKeyToggle = 1;
 export function getGlobalKeyToggle() { return _globalKeyToggle; }
 
 // Tracks the last model that responded successfully (anti-repetition).
-// Rebaixa-para-segundo: lastUsedModel desce para a 2ª posição da ordem fixa.
-// GLM usado → [DS, GLM, MM] | DS usado → [GLM, DS, MM] | MM usado → [GLM, MM, DS]
-// Se o 2º falhar, tenta o último usado de novo (se não bloqueado).
+// Rotaciona o primeiro disponível para o fim se for igual ao lastUsed.
 let _lastUsedModel = null;
 export function getLastUsedModel() { return _lastUsedModel; }
 export function setLastUsedModel(name) {
@@ -38,44 +36,39 @@ function getModelDef(name) {
   return base ? { ...base, name } : null;
 }
 
-/** Reordena DEFAULT_ORDER rebaixando lastUsedModel para a 2ª posição. */
-function reorderForAntiRepetition() {
-  if (!_lastUsedModel || DEFAULT_ORDER.length <= 2) return DEFAULT_ORDER;
-  const idx = DEFAULT_ORDER.indexOf(_lastUsedModel);
-  if (idx === -1) return DEFAULT_ORDER;
-  const others = DEFAULT_ORDER.filter((n) => n !== _lastUsedModel);
-  return [others[0], _lastUsedModel, ...others.slice(1)];
-}
-
 /**
  * Coleta endpoints disponíveis para uma key específica, filtrando bloqueados.
+ * Anti-repetição: se o primeiro disponível é o lastUsed e há >1, rotaciona
+ * (move pro fim). A rotação acontece depois de filtrar bloqueados, então
+ * modelos fallback entram naturalmente na alternância quando prioritários faltam.
  * @param {string[]} keys
  * @param {number} keyIdx
  * @returns {CascadeEndpoint[]}
  */
 export function buildCascadeForKey(keys, keyIdx) {
   const now = Date.now();
-  const order = reorderForAntiRepetition();
-  return order
+  const available = DEFAULT_ORDER
     .map(getModelDef)
     .filter(Boolean)
     .filter((m) => {
       const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
       return now >= s.blockedUntil;
-    })
-    .map((m) => ({ ...m, physicalKey: keyIdx }));
+    });
+
+  if (available.length > 1 && _lastUsedModel && available[0].name === _lastUsedModel) {
+    const [first, ...rest] = available;
+    return [...rest, first].map((m) => ({ ...m, physicalKey: keyIdx }));
+  }
+  return available.map((m) => ({ ...m, physicalKey: keyIdx }));
 }
 
 /**
  * Build the cascade for the next request.
  *
  * - Alternates K1↔K2 via globalKeyToggle.
- * - Rebaixa lastUsedModel para a 2ª posição da ordem fixa (GLM→DS→MM):
- *     GLM usado → [DS, GLM, MM]
- *     DS usado  → [GLM, DS, MM]
- *     MM usado  → [GLM, MM, DS]
- * - Filtra modelos bloqueados na key atual.
- * - Se nada disponível na key inicial, tenta a outra key (mesma ordem).
+ * - Filtra modelos bloqueados na key atual (respeitando prioridade DEFAULT_ORDER).
+ * - Anti-repetição: se o primeiro disponível é o lastUsed e há >1, rotaciona.
+ * - Se nada disponível na key inicial, tenta a outra key (mesma lógica).
  * - Se nada disponível em nenhuma key, absolute fallback: GLM na key inicial
  *   ignorando blocks.
  *
