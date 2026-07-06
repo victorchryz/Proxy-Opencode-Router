@@ -12,7 +12,7 @@ const TARGET_RPM = ENV.targetRpm;
 
 /** Backoff schedule (minutes) for retryable upstream errors.
  *  Starts at 1 min (gentle first retry for transient 5xx) and grows to 1h. */
-const BACKOFF_MINUTES = [2, 3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
+const BACKOFF_MINUTES = [3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
 
 /** @type {Record<string, EndpointState>} */
 const endpointState = {};
@@ -90,7 +90,7 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   // Escalating ensures we don't waste cascade budget by
   // retrying too early and getting another 429 that just renews the window.
   if (status === 429) {
-    const RATE_LIMIT_BACKOFF_MIN = [2, 3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
+    const RATE_LIMIT_BACKOFF_MIN = [3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
     const waitMin = RATE_LIMIT_BACKOFF_MIN[state.backoffIndex] ?? 60;
     state.blockedUntil = Date.now() + waitMin * 60 * 1000;
     state.backoffIndex = Math.min(state.backoffIndex + 1, RATE_LIMIT_BACKOFF_MIN.length - 1);

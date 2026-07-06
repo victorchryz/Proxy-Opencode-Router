@@ -57,8 +57,8 @@ const parseIntSafe = (v, def) => {
  */
 export const ENV = {
   targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 40),
-  connTimeoutMs: parseIntSafe(process.env.PROXY_CONN_TIMEOUT_MS, 45000),
-  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 120000),
+  connTimeoutMs: parseIntSafe(process.env.PROXY_CONN_TIMEOUT_MS, 30000),
+  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 90000),
   maxConcurrent: parseIntSafe(process.env.PROXY_MAX_CONCURRENT, 1),
   port: parseIntSafe(process.env.PROXY_PORT, 9999),
   host: process.env.PROXY_HOST || '127.0.0.1',
