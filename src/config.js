@@ -97,13 +97,14 @@ export function loadModelConfigs() {
   try {
     const raw = fs.readFileSync(OPENCODE_CONFIG_PATH, 'utf8');
     const config = JSON.parse(stripJsonc(raw));
-    const models = config?.provider?.nvidia?.models || {};
     /** @type {ModelOptionsMap} */
     const next = {};
-    for (const name of Object.keys(models)) {
-      next[name] = { ...(models[name].options || {}) };
+    for (const providerName of Object.keys(config?.provider || {})) {
+      const models = config?.provider?.[providerName]?.models || {};
+      for (const name of Object.keys(models)) {
+        next[name] = { ...(models[name].options || {}) };
+      }
     }
-    // Swap in atomically.
     for (const k of Object.keys(modelConfigs)) delete modelConfigs[k];
     Object.assign(modelConfigs, next);
     console.log(`[config] opencode.jsonc carregado — ${Object.keys(next).length} modelo(s).`);

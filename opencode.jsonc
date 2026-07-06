@@ -46,6 +46,50 @@
             "chat_template_kwargs": {"thinking_mode": "adaptive"},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
           }
+        },
+        "gpt-5.5-free": {
+          "name": "GPT-5.5 Free (AIHubMix)",
+          "limit": {"context": 200000, "output": 16384},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true}
+          }
+        },
+        "coding-glm-5.2-free": {
+          "name": "Coding GLM-5.2 Free (AIHubMix)",
+          "limit": {"context": 200000, "output": 32768},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 32768,
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true}
+          }
+        },
+        "xiaomi-mimo-v2.5-pro-free": {
+          "name": "Xiaomi MiMo V2.5 Pro Free (AIHubMix)",
+          "limit": {"context": 200000, "output": 16384},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true}
+          }
+        },
+        "coding-minimax-m3-free": {
+          "name": "Coding MiniMax M3 Free (AIHubMix)",
+          "limit": {"context": 200000, "output": 16384},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true}
+          }
         }
       }
     }

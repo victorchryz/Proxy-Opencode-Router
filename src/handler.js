@@ -162,7 +162,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
         if (!eventStr.trim()) continue;
 
         eventStr = normalizeSSEEvent(eventStr);
-        debug(`[NVIDIA -> PROXY] ${eventStr}`);
+        debug(`[UPSTREAM -> PROXY] ${eventStr}`);
 
         if (!streamId) {
           const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
@@ -212,7 +212,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
         console.warn(`${ts()} [STREAM] Frame parcial (JSON inválido) — enviando mesmo assim.`);
       }
       sseBuffer = normalizeSSEEvent(sseBuffer);
-      debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
+      debug(`[UPSTREAM -> PROXY] ${sseBuffer}`);
 
       if (!streamId) {
         const idMatch = sseBuffer.match(/"id"\s*:\s*"([^"]+)"/);
@@ -593,7 +593,7 @@ export async function handleRequest(req, res) {
       }
     };
 
-    const cascade1 = buildDynamicCascade(PROVIDERS.nvidia);
+    const cascade1 = buildDynamicCascade();
     console.log(
       `${ts()} [PLANO] ${cascade1.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
     );
@@ -601,9 +601,10 @@ export async function handleRequest(req, res) {
     await runCascadeBatch(cascade1, 'K1');
 
     if (!requestComplete && !res.headersSent && !clientRef.value && !stalledAfterHeaders) {
-      const usedKey = cascade1[0]?.physicalKey;
-      const otherKey = (usedKey + 1) % PROVIDERS.nvidia.keys.length;
-      const cascade2 = buildCascadeForKey(PROVIDERS.nvidia.keys, otherKey);
+      const maxKeys = Math.max(...Object.values(PROVIDERS).map((p) => p.keys.length), 1);
+      const usedKey = cascade1[0]?.physicalKey ?? 0;
+      const otherKey = (usedKey + 1) % maxKeys;
+      const cascade2 = buildCascadeForKey(otherKey);
       if (cascade2.length > 0) {
         console.log(
           `${ts()} [PLANO-K2] ${cascade2.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
@@ -620,12 +621,13 @@ export async function handleRequest(req, res) {
 
     if (stalledAfterHeaders && !clientRef.value) {
       const stalledKey = stalledEndpoint.physicalKey;
-      const otherKey = (stalledKey + 1) % PROVIDERS.nvidia.keys.length;
-      const sameKey = buildCascadeForKey(PROVIDERS.nvidia.keys, stalledKey).filter(
-        (ep) => ep !== stalledEndpoint,
+      const maxKeys = Math.max(...Object.values(PROVIDERS).map((p) => p.keys.length), 1);
+      const otherKey = (stalledKey + 1) % maxKeys;
+      const sameKey = buildCascadeForKey(stalledKey).filter(
+        (ep) => ep.provider !== stalledEndpoint.provider || ep.model !== stalledEndpoint.model || ep.physicalKey !== stalledEndpoint.physicalKey,
       );
-      const otherKeyEps = PROVIDERS.nvidia.keys.length > 1
-        ? buildCascadeForKey(PROVIDERS.nvidia.keys, otherKey)
+      const otherKeyEps = maxKeys > 1
+        ? buildCascadeForKey(otherKey)
         : [];
       const remaining = [...sameKey, ...otherKeyEps];
 

@@ -15,13 +15,15 @@ const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
 
 /** Provider short labels for visual tags. */
-const PROVIDER_LABEL = { nvidia: 'NVDA' };
+const PROVIDER_LABEL = { nvidia: 'NVDA', aihubmix: 'AHM' };
 
 /** Color per model slug. */
 function colorForModel(model) {
-  if (model.includes('glm-5.2')) return (s) => `\x1b[36m${s}${RESET}`; // cyan
-  if (model.includes('deepseek-v4-pro')) return (s) => `\x1b[34m${s}${RESET}`; // blue
-  if (model.includes('minimax-m3')) return (s) => `\x1b[31m${s}${RESET}`; // red
+  if (model.includes('glm-5.2')) return (s) => `\x1b[36m${s}${RESET}`;
+  if (model.includes('deepseek-v4-pro')) return (s) => `\x1b[34m${s}${RESET}`;
+  if (model.includes('minimax-m3')) return (s) => `\x1b[31m${s}${RESET}`;
+  if (model.includes('gpt-5.5')) return (s) => `\x1b[32m${s}${RESET}`;
+  if (model.includes('mimo')) return (s) => `\x1b[33m${s}${RESET}`;
   return (s) => s;
 }
 
