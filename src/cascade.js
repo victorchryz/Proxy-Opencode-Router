@@ -13,12 +13,12 @@ import { PROVIDERS } from './providers.js';
  * Fixed priority order across both providers.
  */
 export const MODEL_MAP = {
-  'gpt-5.5-free': { provider: 'aihubmix', model: 'gpt-5.5-free' },
+  // 'gpt-5.5-free': { provider: 'aihubmix', model: 'gpt-5.5-free' },
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
-  'coding-glm-5.2-free': { provider: 'aihubmix', model: 'coding-glm-5.2-free' },
-  'xiaomi-mimo-v2.5-pro-free': { provider: 'aihubmix', model: 'xiaomi-mimo-v2.5-pro-free' },
+  // 'coding-glm-5.2-free': { provider: 'aihubmix', model: 'coding-glm-5.2-free' },
+  // 'xiaomi-mimo-v2.5-pro-free': { provider: 'aihubmix', model: 'xiaomi-mimo-v2.5-pro-free' },
   'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
-  'coding-minimax-m3-free': { provider: 'aihubmix', model: 'coding-minimax-m3-free' },
+  // 'coding-minimax-m3-free': { provider: 'aihubmix', model: 'coding-minimax-m3-free' },
   'minimax-m3': { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
 };
 
