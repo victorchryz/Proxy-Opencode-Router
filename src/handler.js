@@ -143,6 +143,8 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
   let hadUsefulContent = false;
   let stalled = false;
   let streamId = null;
+  let maxChunkGap = 0;
+  let lastChunkTime = Date.now();
   /** @type {string[]} */
   const pendingChunks = [];
   chunkTimer.reset();
@@ -151,6 +153,11 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     for await (let chunk of response.body) {
       if (clientDisconnectedRef.value) break;
       chunkTimer.reset();
+
+      const now = Date.now();
+      const gap = now - lastChunkTime;
+      if (gap > maxChunkGap) maxChunkGap = gap;
+      lastChunkTime = now;
 
       if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
       sseBuffer += chunk.toString('utf-8');
@@ -245,7 +252,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     }
   }
 
-  return { hadUsefulContent, headersSent, stalled, streamId };
+  return { hadUsefulContent, headersSent, stalled, streamId, maxChunkGap };
 }
 
 async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientDisconnectedRef) {
@@ -446,13 +453,16 @@ export async function handleRequest(req, res) {
 
           const controller = new AbortController();
           clientRef.controller = controller;
-          const initialTimer = setTimeout(() => {
-            console.warn(`${ts()} [TIMEOUT] ${ENV.connTimeoutMs}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
-            controller.abort();
-          }, ENV.connTimeoutMs);
+          const currentConnTimeout = state.connectTimeout;
+          const currentStreamTimeout = state.streamTimeout;
 
-          const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
-            console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados! Abortando...`);
+          const initialTimer = setTimeout(() => {
+            console.warn(`${ts()} [TIMEOUT] ${currentConnTimeout}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
+            controller.abort();
+          }, currentConnTimeout);
+
+          const chunkTimer = makeChunkTimer(currentStreamTimeout, () => {
+            console.warn(`${ts()} [STREAM] ${currentStreamTimeout}ms sem dados em ${visualTag(endpoint.provider, endpoint.model, kIdx)}! Abortando...`);
             controller.abort();
           });
 
@@ -469,6 +479,11 @@ export async function handleRequest(req, res) {
             console.log(
               `${ts()} [RESPOSTA] Status ${response.status} em ${((Date.now() - attemptStart) / 1000).toFixed(2)}s`,
             );
+
+            if (response.status < 400) {
+              const actualTTFT = Date.now() - attemptStart;
+              state.connectTimeout = Math.max(25000, Math.min(60000, actualTTFT * 2));
+            }
 
             if (response.status >= 400) {
               chunkTimer.clear();
@@ -516,7 +531,7 @@ export async function handleRequest(req, res) {
                 throw streamErr;
               }
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
-              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null };
+              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null, maxChunkGap: 0 };
             } finally {
               chunkTimer.clear();
             }
@@ -538,6 +553,10 @@ export async function handleRequest(req, res) {
               break;
             }
 
+            if (streamResult && streamResult.headersSent && streamResult.maxChunkGap > 0) {
+              state.streamTimeout = Math.max(30000, Math.min(75000, streamResult.maxChunkGap * 3));
+            }
+
             if (!res.writableEnded) {
               if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
               res.end();
@@ -552,6 +571,13 @@ export async function handleRequest(req, res) {
             if (isAbort) {
               if (!clientRef.value) {
                 console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
+                if (gotResponseHeaders) {
+                  state.streamTimeout = Math.min(75000, Math.round(state.streamTimeout * 1.5));
+                  console.warn(`${ts()} [ADAPTATIVO] Janela STREAM de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.streamTimeout}ms.`);
+                } else {
+                  state.connectTimeout = Math.min(60000, Math.round(state.connectTimeout * 1.5));
+                  console.warn(`${ts()} [ADAPTATIVO] Janela CONEXÃO de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.connectTimeout}ms.`);
+                }
               }
             } else {
               console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);

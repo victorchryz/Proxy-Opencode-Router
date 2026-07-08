@@ -5,21 +5,28 @@
 import { ENV, MIN_INTERVAL_MS } from './config.js';
 import { ts } from './logger.js';
 
-/** @typedef {{ blockedUntil: number, backoffIndex: number }} EndpointState */
+/** @typedef {{ blockedUntil: number, backoffIndex: number, connectTimeout: number, streamTimeout: number }} EndpointState */
 
 const MAX_CONCURRENT = ENV.maxConcurrent;
 const TARGET_RPM = ENV.targetRpm;
 
 /** Backoff schedule (minutes) for retryable upstream errors.
  *  Starts at 1 min (gentle first retry for transient 5xx) and grows to 1h. */
-const BACKOFF_MINUTES = [1, 5, 10, 15, 20, 25, 30, 60];
+const BACKOFF_MINUTES = [2, 5, 10, 15, 20, 25, 30, 60];
 
 /** @type {Record<string, EndpointState>} */
 const endpointState = {};
 
 /** Get (or create) the state slot for a given endpoint id. */
 export function getState(id) {
-  if (!endpointState[id]) endpointState[id] = { blockedUntil: 0, backoffIndex: 0 };
+  if (!endpointState[id]) {
+    endpointState[id] = {
+      blockedUntil: 0,
+      backoffIndex: 0,
+      connectTimeout: ENV.connTimeoutMs,
+      streamTimeout: ENV.streamTimeoutMs,
+    };
+  }
   return endpointState[id];
 }
 
@@ -90,7 +97,7 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   // Escalating ensures we don't waste cascade budget by
   // retrying too early and getting another 429 that just renews the window.
   if (status === 429) {
-    const RATE_LIMIT_BACKOFF_MIN = [1, 5, 10, 15, 20, 25, 30, 60];
+    const RATE_LIMIT_BACKOFF_MIN = [2, 5, 10, 15, 20, 25, 30, 60];
     const waitMin = RATE_LIMIT_BACKOFF_MIN[state.backoffIndex] ?? 60;
     state.blockedUntil = Date.now() + waitMin * 60 * 1000;
     state.backoffIndex = Math.min(state.backoffIndex + 1, RATE_LIMIT_BACKOFF_MIN.length - 1);
