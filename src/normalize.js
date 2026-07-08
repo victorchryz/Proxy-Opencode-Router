@@ -90,12 +90,37 @@ export function injectModelTag(eventStr, model, tagState) {
  * @returns {string}
  */
 export function normalizeSSEEvent(eventStr) {
+  let nvidiaUsage = null;
+
+  if (eventStr.includes('\n')) {
+    const lines = eventStr.split('\n');
+    const dataLines = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith(':')) {
+        try {
+          const c = JSON.parse(trimmed.substring(1).trim());
+          if (c.input_tokens != null && c.output_tokens != null) {
+            nvidiaUsage = {
+              prompt_tokens: c.input_tokens,
+              completion_tokens: c.output_tokens,
+              total_tokens: c.input_tokens + c.output_tokens,
+            };
+          }
+        } catch {}
+      } else if (trimmed.startsWith('data:')) {
+        dataLines.push(line);
+      }
+    }
+    if (dataLines.length > 0) eventStr = dataLines.join('\n');
+  }
+
   if (!eventStr.startsWith('data: ') || eventStr.trim() === 'data: [DONE]') {
     return eventStr;
   }
 
-  // Fast path: skip JSON parsing when there's nothing we'd touch.
-  const needsWork =
+  const needsWork = nvidiaUsage ||
     eventStr.includes('"tool_calls"') ||
     eventStr.includes('"content"') ||
     eventStr.includes('"reasoning"') ||
@@ -107,6 +132,10 @@ export function normalizeSSEEvent(eventStr) {
     parsed = JSON.parse(eventStr.substring(6).trim());
   } catch {
     return eventStr;
+  }
+
+  if (nvidiaUsage && (!parsed.usage || parsed.usage === null)) {
+    parsed.usage = nvidiaUsage;
   }
 
   const delta = parsed?.choices?.[0]?.delta;
