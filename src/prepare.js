@@ -96,7 +96,5 @@ export function buildFetchOptions(method, headers, body, signal) {
     headers,
     body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
     signal,
-    // Node fetch handles gzip/br automatically.
-    compress: true,
   };
 }

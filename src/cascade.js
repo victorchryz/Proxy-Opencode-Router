@@ -18,17 +18,16 @@ export const MODEL_MAP = {
   // 'coding-glm-5.2-free': { provider: 'aihubmix', model: 'coding-glm-5.2-free' },
   // 'xiaomi-mimo-v2.5-pro-free': { provider: 'aihubmix', model: 'xiaomi-mimo-v2.5-pro-free' },
   'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
-  // 'coding-minimax-m3-free': { provider: 'aihubmix', model: 'coding-minimax-m3-free' },
   'minimax-m3': { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
+  'deepseek-v4-flash': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-flash' },
+  // 'coding-minimax-m3-free': { provider: 'aihubmix', model: 'coding-minimax-m3-free' },
 };
 
 const DEFAULT_ORDER = Object.keys(MODEL_MAP);
 
 let _globalKeyToggle = 1;
-export function getGlobalKeyToggle() { return _globalKeyToggle; }
 
 let _lastUsedModel = null;
-export function getLastUsedModel() { return _lastUsedModel; }
 export function setLastUsedModel(name) {
   _lastUsedModel = name;
 }

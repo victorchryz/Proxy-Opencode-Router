@@ -97,10 +97,9 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   // Escalating ensures we don't waste cascade budget by
   // retrying too early and getting another 429 that just renews the window.
   if (status === 429) {
-    const RATE_LIMIT_BACKOFF_MIN = [2, 5, 10, 15, 20, 25, 30, 60];
-    const waitMin = RATE_LIMIT_BACKOFF_MIN[state.backoffIndex] ?? 60;
+    const waitMin = BACKOFF_MINUTES[state.backoffIndex] ?? 60;
     state.blockedUntil = Date.now() + waitMin * 60 * 1000;
-    state.backoffIndex = Math.min(state.backoffIndex + 1, RATE_LIMIT_BACKOFF_MIN.length - 1);
+    state.backoffIndex = Math.min(state.backoffIndex + 1, BACKOFF_MINUTES.length - 1);
     console.log(
       `${ts()} [RATE-LIMIT] 429 sem Retry-After. ${tag} bloqueado por ${waitMin} min (backoff ${state.backoffIndex}).`,
     );

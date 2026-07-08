@@ -121,7 +121,7 @@ export function loadModelConfigs() {
  *   the watcher dies — we detect this and retry every 5s until the file
  *   reappears, then re-arm the watcher.
  */
-export function watchModelConfigs(onChange) {
+export function watchModelConfigs() {
   let timer = null;
   let watcher = null;
 
@@ -132,7 +132,6 @@ export function watchModelConfigs(onChange) {
         timer = setTimeout(() => {
           console.log('[config] opencode.jsonc alterado, recarregando...');
           loadModelConfigs();
-          onChange?.();
         }, 1000);
       });
       watcher.on('error', (err) => {

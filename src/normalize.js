@@ -32,23 +32,22 @@ export function newTagState() {
  * @param {string} eventStr
  * @param {string} model
  * @param {TagState} tagState
- * @returns {{ eventStr: string, tags: string[] }}
+ * @returns {string}
  */
 export function injectModelTag(eventStr, model, tagState) {
   if (!eventStr.startsWith('data: ') || eventStr.trim() === 'data: [DONE]') {
-    return { eventStr, tags: [] };
+    return eventStr;
   }
   let parsed;
   try {
     parsed = JSON.parse(eventStr.substring(6).trim());
   } catch {
-    return { eventStr, tags: [] };
+    return eventStr;
   }
 
   const delta = parsed?.choices?.[0]?.delta;
-  if (!delta) return { eventStr, tags: [] };
+  if (!delta) return eventStr;
 
-  const tags = [];
   let modified = false;
   const stripOldTags = (s) => {
     if (typeof s !== 'string') return s;
@@ -62,8 +61,7 @@ export function injectModelTag(eventStr, model, tagState) {
     if (tagState.reasoningTaggedModel !== model) {
       tagState.reasoningTaggedModel = model;
       delta.reasoning_content = `[Pensamento: ${model}]\n\n${delta.reasoning_content}`;
-      modified = true;
-      tags.push('reasoning');
+modified = true;
     }
   }
 
@@ -71,17 +69,13 @@ export function injectModelTag(eventStr, model, tagState) {
     delta.content = stripOldTags(delta.content);
     if (tagState.contentTaggedModel !== model) {
       tagState.contentTaggedModel = model;
-      delta.content = `[Resposta: ${model}]\n\n${delta.content}`;
+      delta.content = `\n\n${delta.content}`;
       modified = true;
-      tags.push('content');
     }
   }
 
-  // Only re-serialize if we actually changed something. Previously, when a
-  // stale tag was stripped but no NEW tag was injected (model already tagged),
-  // we returned the original eventStr and the stale tag leaked through.
-  if (!modified) return { eventStr, tags };
-  return { eventStr: 'data: ' + JSON.stringify(parsed), tags };
+  if (!modified) return eventStr;
+  return 'data: ' + JSON.stringify(parsed);
 }
 
 /**

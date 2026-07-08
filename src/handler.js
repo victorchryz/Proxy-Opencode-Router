@@ -63,7 +63,6 @@ async function writeSSE(res, data) {
     }
     // Still needs drain after 5s → socket is likely dead. Poison it.
     console.warn(`${ts()} [STREAM] Drain timeout (5s) — socket provavelmente morto, parando writes.`);
-    res.__poisoned = true;
     try { res.destroy(); } catch { /* ignore */ }
     return false;
   }
@@ -98,6 +97,22 @@ async function sendSyntheticChunk(res, streamId, content, model = 'proxy') {
       }) +
       '\n\n',
   );
+}
+
+async function sendErrorStream(res, streamId, content) {
+  try {
+    await sendSyntheticChunk(res, streamId, content);
+    await writeSSE(res, 'data: ' + JSON.stringify({
+      id: streamId, object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000), model: 'proxy',
+      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+    }) + '\n\n');
+    if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+    res.end();
+  } catch (e) {
+    console.warn(`${ts()} [STREAM-FALHOU] Erro ao encerrar: ${e.message}`);
+    try { res.destroy(); } catch { /* ignore */ }
+  }
 }
 
 /** Read the entire request body into a string. No size cap — both the client
@@ -149,6 +164,38 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
   const pendingChunks = [];
   chunkTimer.reset();
 
+  async function processEvent(eventStr) {
+    if (!streamId) {
+      const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
+      if (idMatch) streamId = idMatch[1];
+    }
+
+    if (!headersSent) {
+      let parsed;
+      try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
+      const delta = parsed?.choices?.[0]?.delta;
+      if (deltaHasUsefulContent(delta)) {
+        headersSent = true;
+        hadUsefulContent = true;
+        res.writeHead(200, resHeaders);
+        for (const pending of pendingChunks) {
+          const alive = await writeSSE(res, pending);
+          if (!alive) { clientDisconnectedRef.value = true; break; }
+        }
+        pendingChunks.length = 0;
+      }
+    }
+
+    const taggedStr = injectModelTag(eventStr, endpoint.model, tagState);
+
+    if (headersSent) {
+      const alive = await writeSSE(res, taggedStr + '\n\n');
+      if (!alive) clientDisconnectedRef.value = true;
+    } else {
+      pendingChunks.push(taggedStr + '\n\n');
+    }
+  }
+
   try {
     for await (let chunk of response.body) {
       if (clientDisconnectedRef.value) break;
@@ -167,39 +214,10 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
 
       for (let eventStr of events) {
         if (!eventStr.trim()) continue;
-
         eventStr = normalizeSSEEvent(eventStr);
         debug(`[UPSTREAM -> PROXY] ${eventStr}`);
-
-        if (!streamId) {
-          const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
-          if (idMatch) streamId = idMatch[1];
-        }
-
-        if (!headersSent) {
-          let parsed;
-          try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
-          const delta = parsed?.choices?.[0]?.delta;
-          if (deltaHasUsefulContent(delta)) {
-            headersSent = true;
-            hadUsefulContent = true;
-            res.writeHead(200, resHeaders);
-            for (const pending of pendingChunks) {
-              const alive = await writeSSE(res, pending);
-              if (!alive) { clientDisconnectedRef.value = true; break; }
-            }
-            pendingChunks.length = 0;
-          }
-        }
-
-        const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
-
-        if (headersSent) {
-          const alive = await writeSSE(res, taggedStr + '\n\n');
-          if (!alive) { clientDisconnectedRef.value = true; break; }
-        } else {
-          pendingChunks.push(taggedStr + '\n\n');
-        }
+        await processEvent(eventStr);
+        if (clientDisconnectedRef.value) break;
       }
     }
   } catch (streamErr) {
@@ -220,35 +238,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
       }
       sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[UPSTREAM -> PROXY] ${sseBuffer}`);
-
-      if (!streamId) {
-        const idMatch = sseBuffer.match(/"id"\s*:\s*"([^"]+)"/);
-        if (idMatch) streamId = idMatch[1];
-      }
-
-      if (!headersSent) {
-        let parsed;
-        try { parsed = JSON.parse(sseBuffer.substring(6).trim()); } catch { parsed = null; }
-        const delta = parsed?.choices?.[0]?.delta;
-        if (deltaHasUsefulContent(delta)) {
-          headersSent = true;
-          hadUsefulContent = true;
-          res.writeHead(200, resHeaders);
-          for (const pending of pendingChunks) {
-            const alive = await writeSSE(res, pending);
-            if (!alive) { clientDisconnectedRef.value = true; break; }
-          }
-          pendingChunks.length = 0;
-        }
-      }
-
-      const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
-
-      if (headersSent) {
-        await writeSSE(res, taggedStr + '\n\n');
-      } else {
-        pendingChunks.push(taggedStr + '\n\n');
-      }
+      await processEvent(sseBuffer);
     }
   }
 
@@ -302,7 +292,7 @@ async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId,
         if (!eventStr.trim()) continue;
         eventStr = normalizeSSEEvent(eventStr);
         debug(`[STALL-FALLBACK -> PROXY] ${eventStr}`);
-        const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
+        const taggedStr = injectModelTag(eventStr, nextEp.model, tagState);
         const out = stallStreamId
           ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
           : taggedStr;
@@ -314,7 +304,7 @@ async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId,
     if (sseBuffer.trim() && !clientDisconnectedRef.value) {
       sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[STALL-FALLBACK -> PROXY] ${sseBuffer}`);
-      const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
+      const taggedStr = injectModelTag(sseBuffer, nextEp.model, tagState);
       const out = stallStreamId
         ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
         : taggedStr;
@@ -482,7 +472,7 @@ export async function handleRequest(req, res) {
 
             if (response.status < 400) {
               const actualTTFT = Date.now() - attemptStart;
-              state.connectTimeout = Math.max(25000, Math.min(60000, actualTTFT * 2));
+              state.connectTimeout = Math.max(30000, Math.min(60000, actualTTFT * 2));
             }
 
             if (response.status >= 400) {
@@ -500,7 +490,7 @@ export async function handleRequest(req, res) {
                 response.headers,
               );
               attemptsLog.push(`FAIL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+              recordRequest(endpoint.model, Date.now() - attemptStart, true);
 
               if (abortCascade) {
                 if (res.headersSent) {
@@ -539,14 +529,14 @@ export async function handleRequest(req, res) {
             if (streamResult && !streamResult.headersSent) {
               console.log(`${ts()} [VAZIO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream sem conteúdo útil, tentando próximo.`);
               attemptsLog[attemptsLog.length - 1] = `EMPTY ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
-              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+              recordRequest(endpoint.model, Date.now() - attemptStart, true);
               break;
             }
 
             if (streamResult && streamResult.stalled && streamResult.headersSent) {
               console.log(`${ts()} [STALL] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream estalou, tentando fallback...`);
               attemptsLog[attemptsLog.length - 1] = `STALL ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
-              recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+              recordRequest(endpoint.model, Date.now() - attemptStart, true);
               stallStreamId = streamResult.streamId;
               stalledEndpoint = endpoint;
               stalledAfterHeaders = true;
@@ -554,14 +544,14 @@ export async function handleRequest(req, res) {
             }
 
             if (streamResult && streamResult.headersSent && streamResult.maxChunkGap > 0) {
-              state.streamTimeout = Math.max(30000, Math.min(75000, streamResult.maxChunkGap * 3));
+              state.streamTimeout = Math.max(45000, Math.min(75000, streamResult.maxChunkGap * 3));
             }
 
             if (!res.writableEnded) {
               if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
               res.end();
             }
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
+            recordRequest(endpoint.model, Date.now() - attemptStart, false);
             requestComplete = true;
             break;
           } catch (fetchErr) {
@@ -572,10 +562,10 @@ export async function handleRequest(req, res) {
               if (!clientRef.value) {
                 console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
                 if (gotResponseHeaders) {
-                  state.streamTimeout = Math.min(75000, Math.round(state.streamTimeout * 1.5));
+                  state.streamTimeout = Math.min(90000, Math.round(state.streamTimeout * 1.5));
                   console.warn(`${ts()} [ADAPTATIVO] Janela STREAM de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.streamTimeout}ms.`);
                 } else {
-                  state.connectTimeout = Math.min(60000, Math.round(state.connectTimeout * 1.5));
+                  state.connectTimeout = Math.min(75000, Math.round(state.connectTimeout * 1.5));
                   console.warn(`${ts()} [ADAPTATIVO] Janela CONEXÃO de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.connectTimeout}ms.`);
                 }
               }
@@ -583,28 +573,11 @@ export async function handleRequest(req, res) {
               console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);
             }
             attemptsLog.push(`NET ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
-            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            recordRequest(endpoint.model, Date.now() - attemptStart, true);
 
             if (res.headersSent && !res.writableEnded && !clientRef.value) {
               console.log(`${ts()} [STREAM-FALHOU] Encerrando stream do cliente após abort.`);
-              const errStreamId = 'chatcmpl-proxy-abort';
-              try {
-                await writeSSE(res, 'data: ' + JSON.stringify({
-                  id: errStreamId, object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000), model: 'proxy',
-                  choices: [{ delta: { content: '\n\n[Stream interrompido por timeout]' }, index: 0, finish_reason: null }],
-                }) + '\n\n');
-                await writeSSE(res, 'data: ' + JSON.stringify({
-                  id: errStreamId, object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000), model: 'proxy',
-                  choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                }) + '\n\n');
-                if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-                res.end();
-              } catch (e) {
-                console.warn(`${ts()} [STREAM-FALHOU] Erro ao encerrar: ${e.message}`);
-                try { res.destroy(); } catch { /* ignore */ }
-              }
+              await sendErrorStream(res, 'chatcmpl-proxy-abort', '\n\n[Stream interrompido por timeout]');
               requestComplete = true;
               break;
             }
@@ -670,12 +643,12 @@ export async function handleRequest(req, res) {
         const ok = await runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientRef);
         if (ok) {
           attemptsLog.push(`OK ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
-          recordRequest(nextEp.model, Date.now() - fbStart, false, false);
+          recordRequest(nextEp.model, Date.now() - fbStart, false);
           fallbackOk = true;
           break;
         } else {
           attemptsLog.push(`FAIL ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
-          recordRequest(nextEp.model, Date.now() - fbStart, false, true);
+          recordRequest(nextEp.model, Date.now() - fbStart, true);
         }
       }
 
@@ -686,24 +659,7 @@ export async function handleRequest(req, res) {
         }
         requestComplete = true;
       } else if (!clientRef.value) {
-        const stallErrId = stallStreamId || 'chatcmpl-proxy-stall';
-        try {
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: stallErrId, object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000), model: 'proxy',
-            choices: [{ delta: { content: '\n\n[Stream interrompido — todos os fallbacks falharam]' }, index: 0, finish_reason: null }],
-          }) + '\n\n');
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: stallErrId, object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000), model: 'proxy',
-            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-          }) + '\n\n');
-          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-          res.end();
-        } catch (e) {
-          console.warn(`${ts()} [STALL-FALHOU] Erro ao encerrar: ${e.message}`);
-          try { res.destroy(); } catch { /* ignore */ }
-        }
+        await sendErrorStream(res, stallStreamId || 'chatcmpl-proxy-stall', '\n\n[Stream interrompido — todos os fallbacks falharam]');
         requestComplete = true;
       }
     }
@@ -722,20 +678,12 @@ export async function handleRequest(req, res) {
         const msg = waitSec > 0 && waitSec < 30 * 60
           ? `\n[Proxy: todos os modelos indisponíveis — aguarde ${waitSec}s e reenvie]`
           : '\n[Proxy: serviço indisponível — tente novamente]';
-        const errStreamId = 'chatcmpl-proxy-exhausted';
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
         });
-        await sendSyntheticChunk(res, errStreamId, msg);
-        await writeSSE(res, 'data: ' + JSON.stringify({
-          id: errStreamId, object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000), model: 'proxy',
-          choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-        }) + '\n\n');
-        if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-        res.end();
+        await sendErrorStream(res, 'chatcmpl-proxy-exhausted', msg);
       } else {
         if (waitSec > 0 && waitSec < 30 * 60) {
           res.writeHead(429, { 'Retry-After': String(waitSec), 'Content-Type': 'application/json' });
@@ -755,21 +703,13 @@ export async function handleRequest(req, res) {
     if (!res.headersSent && !clientRef.value) {
       const wantsStream = parsedOriginal?.stream !== false;
       if (wantsStream) {
-        const errStreamId = 'chatcmpl-proxy-error';
         try {
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
           });
-          await sendSyntheticChunk(res, errStreamId, '\n[Proxy: erro interno — tente novamente]');
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: errStreamId, object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000), model: 'proxy',
-            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-          }) + '\n\n');
-          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-          res.end();
+          await sendErrorStream(res, 'chatcmpl-proxy-error', '\n[Proxy: erro interno — tente novamente]');
         } catch {
           try { res.destroy(); } catch { /* ignore */ }
         }
@@ -799,22 +739,7 @@ export function createServer() {
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
           });
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: 'chatcmpl-proxy-uncaught',
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: 'proxy',
-            choices: [{ delta: { content: '\n[Proxy: erro interno — tente novamente]' }, index: 0, finish_reason: null }],
-          }) + '\n\n');
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: 'chatcmpl-proxy-uncaught',
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: 'proxy',
-            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-          }) + '\n\n');
-          await writeSSE(res, 'data: [DONE]\n\n');
-          res.end();
+          await sendErrorStream(res, 'chatcmpl-proxy-uncaught', '\n[Proxy: erro interno — tente novamente]');
         } catch {
           try { res.destroy(); } catch { /* ignore */ }
         }

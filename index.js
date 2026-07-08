@@ -21,7 +21,7 @@ installDebugToggler();
 const server = createServer();
 
 server.listen(ENV.port, ENV.host, () => {
-  console.log(`\n\x1b[36m🚀 proxy-opencode-router v3.7.0 ativo!\x1b[0m`);
+  console.log(`\n\x1b[36m🚀 proxy-opencode-router v3.8.0 ativo!\x1b[0m`);
   console.log(`🛡  Host:Port      : ${ENV.host}:${ENV.port}`);
   console.log(`🛡  RPM alvo       : ${ENV.targetRpm} (intervalo ${MIN_INTERVAL_MS}ms)`);
   console.log(`🛡  Concorrência   : ${ENV.maxConcurrent}`);
@@ -44,7 +44,5 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 // launched from a non-interactive command runner that closes after spawn).
 process.on('SIGHUP', () => console.log('[SIGHUP] ignorado (proxy continua ativo)'));
 
-// Diagnostic: log unexpected exits so we can tell crash vs signal apart.
-process.on('exit', (code) => console.log(`[exit] code=${code}`));
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err?.stack ?? err));
 process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.stack ?? err));
