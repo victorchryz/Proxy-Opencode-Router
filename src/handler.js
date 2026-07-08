@@ -83,25 +83,18 @@ function makeChunkTimer(ms, onTimeout) {
   };
 }
 
-/** Send a small synthetic chunk (used for fallback notices / final errors). */
-async function sendSyntheticChunk(res, streamId, content, model = 'proxy') {
-  await writeSSE(
-    res,
-    'data: ' +
-      JSON.stringify({
+async function sendErrorStream(res, streamId, content) {
+  try {
+    await writeSSE(
+      res,
+      'data: ' + JSON.stringify({
         id: streamId,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
-        model,
+        model: 'proxy',
         choices: [{ delta: { content }, index: 0, finish_reason: null }],
-      }) +
-      '\n\n',
-  );
-}
-
-async function sendErrorStream(res, streamId, content) {
-  try {
-    await sendSyntheticChunk(res, streamId, content);
+      }) + '\n\n',
+    );
     await writeSSE(res, 'data: ' + JSON.stringify({
       id: streamId, object: 'chat.completion.chunk',
       created: Math.floor(Date.now() / 1000), model: 'proxy',
@@ -152,12 +145,12 @@ function deltaHasUsefulContent(delta) {
  *   filtered of hop-by-hop). Only used if we actually writeHead.
  * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean }>}
  */
-async function pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef) {
+async function pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef, streamIdOverride = null) {
   let sseBuffer = '';
-  let headersSent = false;
-  let hadUsefulContent = false;
+  let headersSent = streamIdOverride !== null;
+  let hadUsefulContent = streamIdOverride !== null;
   let stalled = false;
-  let streamId = null;
+  let streamId = streamIdOverride;
   let maxChunkGap = 0;
   let lastChunkTime = Date.now();
   /** @type {string[]} */
@@ -186,13 +179,16 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
       }
     }
 
-    const taggedStr = injectModelTag(eventStr, endpoint.model, tagState);
+    let out = injectModelTag(eventStr, endpoint.model, tagState);
+    if (streamIdOverride) {
+      out = out.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${streamIdOverride}"`);
+    }
 
     if (headersSent) {
-      const alive = await writeSSE(res, taggedStr + '\n\n');
+      const alive = await writeSSE(res, out + '\n\n');
       if (!alive) clientDisconnectedRef.value = true;
     } else {
-      pendingChunks.push(taggedStr + '\n\n');
+      pendingChunks.push(out + '\n\n');
     }
   }
 
@@ -276,42 +272,8 @@ async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId,
     getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
 
     const tagState = newTagState();
-    let sseBuffer = '';
-    chunkTimer.reset();
-
-    for await (let chunk of response.body) {
-      if (clientDisconnectedRef.value) break;
-      chunkTimer.reset();
-      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
-      sseBuffer += chunk.toString('utf-8');
-
-      const events = sseBuffer.split('\n\n');
-      sseBuffer = events.pop() ?? '';
-
-      for (let eventStr of events) {
-        if (!eventStr.trim()) continue;
-        eventStr = normalizeSSEEvent(eventStr);
-        debug(`[STALL-FALLBACK -> PROXY] ${eventStr}`);
-        const taggedStr = injectModelTag(eventStr, nextEp.model, tagState);
-        const out = stallStreamId
-          ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
-          : taggedStr;
-        const alive = await writeSSE(res, out + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      }
-    }
-
-    if (sseBuffer.trim() && !clientDisconnectedRef.value) {
-      sseBuffer = normalizeSSEEvent(sseBuffer);
-      debug(`[STALL-FALLBACK -> PROXY] ${sseBuffer}`);
-      const taggedStr = injectModelTag(sseBuffer, nextEp.model, tagState);
-      const out = stallStreamId
-        ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${stallStreamId}"`)
-        : taggedStr;
-      await writeSSE(res, out + '\n\n');
-    }
-
-    return true;
+    const result = await pumpStream(response, res, {}, nextEp, tagState, controller, chunkTimer, clientDisconnectedRef, stallStreamId);
+    return !result.stalled;
   } catch (err) {
     clearTimeout(initialTimer);
     if (err?.name === 'AbortError') {
@@ -419,7 +381,7 @@ export async function handleRequest(req, res) {
     let stallStreamId = null;
     let stalledEndpoint = null;
 
-    const runCascadeBatch = async (cascade, batchLabel) => {
+    const runCascadeBatch = async (cascade) => {
       for (const endpoint of cascade) {
         const provider = PROVIDERS[endpoint.provider];
         if (!provider || provider.keys.length === 0) continue;
@@ -597,7 +559,7 @@ export async function handleRequest(req, res) {
       `${ts()} [PLANO] ${cascade1.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
     );
 
-    await runCascadeBatch(cascade1, 'K1');
+    await runCascadeBatch(cascade1);
 
     if (!requestComplete && !res.headersSent && !clientRef.value && !stalledAfterHeaders) {
       const maxKeys = Math.max(...Object.values(PROVIDERS).map((p) => p.keys.length), 1);
@@ -609,7 +571,7 @@ export async function handleRequest(req, res) {
           `${ts()} [PLANO-K2] ${cascade2.map((e) => visualTag(e.provider, e.model, e.physicalKey)).join(' -> ')}`,
         );
         abortCascade = false;
-        await runCascadeBatch(cascade2, 'K2');
+        await runCascadeBatch(cascade2);
       }
     }
 

@@ -17,21 +17,20 @@ const DIM = '\x1b[90m';
 /** Provider short labels for visual tags. */
 const PROVIDER_LABEL = { nvidia: 'NVDA', aihubmix: 'AHM' };
 
-/** Color per model slug. */
-function colorForModel(model) {
-  if (model.includes('glm-5.2')) return (s) => `\x1b[36m${s}${RESET}`;
-  if (model.includes('deepseek-v4-pro')) return (s) => `\x1b[34m${s}${RESET}`;
-  if (model.includes('minimax-m3')) return (s) => `\x1b[31m${s}${RESET}`;
-  if (model.includes('gpt-5.5')) return (s) => `\x1b[32m${s}${RESET}`;
-  if (model.includes('mimo')) return (s) => `\x1b[33m${s}${RESET}`;
-  return (s) => s;
-}
+const MODEL_COLORS = {
+  'glm-5.2': '\x1b[36m',
+  'deepseek-v4-pro': '\x1b[34m',
+  'minimax-m3': '\x1b[31m',
+  'gpt-5.5': '\x1b[32m',
+  'mimo': '\x1b[33m',
+};
 
 /** Build the colored tag shown on every log line, e.g. `glm-5.2 [NVDA K1]`. */
 export function visualTag(provider, model, keyIdx) {
   const slug = model.includes('/') ? model.split('/').pop() : model;
   const ptag = PROVIDER_LABEL[provider] || provider.toUpperCase();
-  return `${colorForModel(model)(slug)} [${ptag} K${keyIdx + 1}]`;
+  const color = Object.entries(MODEL_COLORS).find(([k]) => model.includes(k))?.[1];
+  return `${color ? `${color}${slug}${RESET}` : slug} [${ptag} K${keyIdx + 1}]`;
 }
 
 /** Console timestamp `[HH:MM:SS]` (dimmed). */
