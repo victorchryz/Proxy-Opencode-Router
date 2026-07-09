@@ -2,7 +2,6 @@
   "$schema": "https://opencode.ai/config.json",
   "autoupdate": true,
   "lsp": true,
-  /*"plugin": ["/var/home/unknown/.local/share/opencode-plugins/node_modules/@dietrichgebert/ponytail/.opencode/plugins/ponytail.mjs"],*/
   "provider": {
     "Free Models Router": {
       "npm": "@ai-sdk/openai-compatible",
@@ -23,6 +22,18 @@
             "max_tokens": 32768,
             "reasoning_effort": "max",
             "chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false},
+            "stream_options": {"include_usage": true, "continuous_usage_stats": true}
+          }
+        },
+        "moonshotai/kimi-k2.6": {
+          "name": "Kimi K2.6 (Nvidia)",
+          "limit": {"context": 200000, "output": 65536},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 65536,
+            "chat_template_kwargs": {"thinking": true},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
           }
         },

@@ -15,6 +15,7 @@ import { PROVIDERS } from './providers.js';
 export const MODEL_MAP = {
   // 'gpt-5.5-free': { provider: 'aihubmix', model: 'gpt-5.5-free' },
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
+  'kimi-k2.6': { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
   // 'coding-glm-5.2-free': { provider: 'aihubmix', model: 'coding-glm-5.2-free' },
   // 'xiaomi-mimo-v2.5-pro-free': { provider: 'aihubmix', model: 'xiaomi-mimo-v2.5-pro-free' },
   'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
