@@ -69,7 +69,7 @@ modified = true;
     delta.content = stripOldTags(delta.content);
     if (tagState.contentTaggedModel !== model) {
       tagState.contentTaggedModel = model;
-      delta.content = `\n\n${delta.content}`;
+      delta.content = `[Resposta: ${model}]\n\n${delta.content}`;
       modified = true;
     }
   }
