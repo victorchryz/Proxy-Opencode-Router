@@ -660,6 +660,73 @@ export async function handleRequest(req, res) {
       }
     }
 
+    if (incompleteAfterHeaders && !clientRef.value) {
+      const incompleteKey = incompleteEndpoint.physicalKey;
+      const maxKeys = Math.max(...Object.values(PROVIDERS).map((p) => p.keys.length), 1);
+      const otherKey = (incompleteKey + 1) % maxKeys;
+      const sameKey = buildCascadeForKey(incompleteKey).filter(
+        (ep) => ep.provider !== incompleteEndpoint.provider || ep.model !== incompleteEndpoint.model || ep.physicalKey !== incompleteEndpoint.physicalKey,
+      );
+      const otherKeyEps = maxKeys > 1
+        ? buildCascadeForKey(otherKey)
+        : [];
+      const remaining = [...sameKey, ...otherKeyEps];
+
+      const fbParsedOriginal = { ...parsedOriginal, messages: undefined };
+      if (Array.isArray(parsedOriginal.messages)) {
+        fbParsedOriginal.messages = parsedOriginal.messages.map((m) => ({ ...m }));
+        if (incompleteReasoningBuf.trim()) {
+          const lastUserIdx = fbParsedOriginal.messages.findLastIndex?.((m) => m.role === 'user') ?? -1;
+          if (lastUserIdx >= 0) {
+            const suffix =
+              '\n\n---\n[Contexto de raciocínio do modelo anterior — use como referência, mas verifique e questione antes de confiar. O pensamento abaixo pode conter erros ou conclusões precipitadas:]\n\n' +
+              incompleteReasoningBuf.trim();
+            const msg = fbParsedOriginal.messages[lastUserIdx];
+            if (Array.isArray(msg.content)) {
+              const textPart = msg.content.find((p) => p.type === 'text');
+              if (textPart) textPart.text += suffix;
+              else msg.content.push({ type: 'text', text: suffix });
+            } else if (typeof msg.content === 'string') {
+              msg.content += suffix;
+            }
+          }
+        }
+      }
+
+      let fallbackOk = false;
+      let triedOtherKey = false;
+      for (const nextEp of remaining) {
+        if (clientRef.value) break;
+        if (!triedOtherKey && nextEp.physicalKey !== incompleteKey) {
+          console.log(`${ts()} [INCOMPLETE-FALLBACK-K2] Tentando outra key...`);
+          triedOtherKey = true;
+        }
+        await enforceTimeLimit();
+        const fbStart = Date.now();
+        const ok = await runStallFallback(req, res, fbParsedOriginal, nextEp, incompleteStreamId, clientRef);
+        if (ok) {
+          attemptsLog.push(`OK ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
+          recordRequest(nextEp.model, Date.now() - fbStart, false);
+          fallbackOk = true;
+          break;
+        } else {
+          attemptsLog.push(`FAIL ${visualTag(nextEp.provider, nextEp.model, nextEp.physicalKey)}`);
+          recordRequest(nextEp.model, Date.now() - fbStart, true);
+        }
+      }
+
+      if (fallbackOk) {
+        if (!res.writableEnded) {
+          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+          res.end();
+        }
+        requestComplete = true;
+      } else if (!clientRef.value) {
+        await sendErrorStream(res, incompleteStreamId || 'chatcmpl-proxy-incomplete', '\n\n[Resposta incompleta — todos os fallbacks falharam]');
+        requestComplete = true;
+      }
+    }
+
     // Every endpoint failed without aborting — emit a synthetic SSE stream
     // so the client (opencode) sees a completed response instead of a hard
     // 429/503 JSON error. A hard error makes opencode stop and require the
