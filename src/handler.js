@@ -399,6 +399,10 @@ export async function handleRequest(req, res) {
     let stalledAfterHeaders = false;
     let stallStreamId = null;
     let stalledEndpoint = null;
+    let incompleteAfterHeaders = false;
+    let incompleteStreamId = null;
+    let incompleteReasoningBuf = '';
+    let incompleteEndpoint = null;
 
     const runCascadeBatch = async (cascade) => {
       for (const endpoint of cascade) {
@@ -528,13 +532,23 @@ export async function handleRequest(req, res) {
               state.streamTimeout = Math.max(45000, Math.min(75000, streamResult.maxChunkGap * 3));
             }
 
-            if (!res.writableEnded) {
-              if (streamResult.finishChunkBuf) await writeSSE(res, streamResult.finishChunkBuf + '\n\n');
-              if (!res.__doneSent && streamResult.doneBuf) await writeSSE(res, streamResult.doneBuf + '\n\n');
-              res.end();
+            if (streamResult.finishReason !== null) {
+              if (!res.writableEnded) {
+                if (streamResult.finishChunkBuf) await writeSSE(res, streamResult.finishChunkBuf + '\n\n');
+                if (!res.__doneSent && streamResult.doneBuf) await writeSSE(res, streamResult.doneBuf + '\n\n');
+                res.end();
+              }
+              recordRequest(endpoint.model, Date.now() - attemptStart, false);
+              requestComplete = true;
+            } else {
+              console.log(`${ts()} [INCOMPLETO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream terminou sem finish_reason, acionando fallback.`);
+              attemptsLog[attemptsLog.length - 1] = `INCOMPLETE ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+              recordRequest(endpoint.model, Date.now() - attemptStart, true);
+              incompleteStreamId = streamResult.streamId;
+              incompleteReasoningBuf = streamResult.reasoningBuf;
+              incompleteEndpoint = endpoint;
+              incompleteAfterHeaders = true;
             }
-            recordRequest(endpoint.model, Date.now() - attemptStart, false);
-            requestComplete = true;
             break;
           } catch (fetchErr) {
             clearTimeout(initialTimer);
@@ -570,7 +584,7 @@ export async function handleRequest(req, res) {
           }
         }
 
-        if (requestComplete || clientRef.value || abortCascade || stalledAfterHeaders) return;
+        if (requestComplete || clientRef.value || abortCascade || stalledAfterHeaders || incompleteAfterHeaders) return;
       }
     };
 
