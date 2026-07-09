@@ -21,7 +21,7 @@ import {
   injectModelTag,
   newTagState,
 } from './normalize.js';
-import { createProxyHeaders, buildFetchOptions, prepareBody } from './prepare.js';
+import { createProxyHeaders, prepareBody } from './prepare.js';
 import { recordRequest, snapshot as metricsSnapshot } from './metrics.js';
 import { ts, visualTag, debug, isDebug } from './logger.js';
 import { HOP_BY_HOP } from './constants.js';
@@ -119,20 +119,6 @@ async function readBody(req) {
 }
 
 /**
- * Check whether a parsed delta has any useful content (content, tool_calls,
- * or reasoning_content — anything the client can actually use).
- * @param {Record<string,any>} delta
- * @returns {boolean}
- */
-function deltaHasUsefulContent(delta) {
-  if (!delta) return false;
-  if (typeof delta.content === 'string' && delta.content.trim() !== '') return true;
-  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
-  if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.trim() !== '') return true;
-  return false;
-}
-
-/**
  * Stream one upstream response into the client, applying normalization & tags.
  *
  * Buffers chunks internally until the first useful content delta arrives.
@@ -167,7 +153,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
       let parsed;
       try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
       const delta = parsed?.choices?.[0]?.delta;
-      if (deltaHasUsefulContent(delta)) {
+      if (delta && ((typeof delta.content === 'string' && delta.content.trim()) || (Array.isArray(delta.tool_calls) && delta.tool_calls.length) || (typeof delta.reasoning_content === 'string' && delta.reasoning_content.trim()))) {
         headersSent = true;
         hadUsefulContent = true;
         res.writeHead(200, resHeaders);
@@ -258,7 +244,7 @@ async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId,
     const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[fkIdx]);
     console.log(`${ts()} [STALL-FALLBACK] -> ${visualTag(nextEp.provider, nextEp.model, fkIdx)}`);
 
-    const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+    const response = await fetch(url, { method: req.method, headers, body: req.method !== 'GET' && req.method !== 'HEAD' ? body : undefined, signal: controller.signal });
     clearTimeout(initialTimer);
 
     if (response.status >= 400) {
@@ -425,7 +411,7 @@ export async function handleRequest(req, res) {
             const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[kIdx]);
             console.log(`${ts()} [INÍCIO] -> ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 
-            const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+    const response = await fetch(url, { method: req.method, headers, body: req.method !== 'GET' && req.method !== 'HEAD' ? body : undefined, signal: controller.signal });
             clearTimeout(initialTimer);
             gotResponseHeaders = true;
             console.log(

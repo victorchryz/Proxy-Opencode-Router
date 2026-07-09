@@ -5,37 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = import.meta.dirname;
 
-// ---------------------------------------------------------------------------
-// Minimal .env loader (no external deps). Bun loads .env natively; Node does
-// not, so we do it ourselves. Only sets vars that aren't already defined.
-// ---------------------------------------------------------------------------
-function loadDotEnv() {
-  const envPath = path.join(__dirname, '..', '.env');
-  let raw;
-  try {
-    raw = fs.readFileSync(envPath, 'utf8');
-  } catch {
-    return; // no .env file — fine, env may come from the shell
-  }
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    // Strip surrounding quotes if present.
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    if (!(key in process.env)) process.env[key] = val;
-  }
-}
-loadDotEnv();
+process.loadEnvFile();
 
 /** @typedef {Record<string, Record<string, unknown>>} ModelOptionsMap */
 
@@ -68,7 +41,7 @@ export const ENV = {
 export const MIN_INTERVAL_MS = Math.ceil(60000 / ENV.targetRpm);
 
 /** Path to opencode.jsonc (~/.config/opencode/opencode.jsonc). */
-export const OPENCODE_CONFIG_PATH = path.join(
+const OPENCODE_CONFIG_PATH = path.join(
   process.env.HOME || os.homedir(),
   '.config',
   'opencode',

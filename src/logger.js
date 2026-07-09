@@ -3,9 +3,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = import.meta.dirname;
 const DEBUG_LOG_PATH = path.join(__dirname, '..', 'debug.log');
 
 let DEBUG_MODE = false;
@@ -40,7 +39,7 @@ export function ts() {
 }
 
 /** Toggle debug logging on/off. When on, dumps raw request/response bodies. */
-export function setDebug(on) {
+function setDebug(on) {
   DEBUG_MODE = on;
   if (on && !debugFh) {
     debugFh = fs.createWriteStream(DEBUG_LOG_PATH, { flags: 'w' });

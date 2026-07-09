@@ -85,16 +85,3 @@ export function createProxyHeaders(reqHeaders, providerBaseUrl, key) {
   headers['authorization'] = `Bearer ${key}`;
   return headers;
 }
-
-/**
- * Compose the fetch() options object.
- * @returns {RequestInit & { signal: AbortSignal }}
- */
-export function buildFetchOptions(method, headers, body, signal) {
-  return {
-    method,
-    headers,
-    body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
-    signal,
-  };
-}
