@@ -4,11 +4,13 @@ Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) p
 
 ## Funcionalidades
 
-- **Cascata com prioridade fixa:** `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
+- **Cascata com prioridade fixa:** `glm-5.2 → deepseek-v4-pro → minimax-m3 → deepseek-v4-flash`
 - **Anti-repetição cross-key:** o último modelo usado é pulado na próxima requisição (K1↔K2)
 - **Fallback de key:** se todos os modelos estão bloqueados na key atual, tenta a outra
-- **Fallback Kimi automático:** se Kimi retorna só raciocínio (sem resposta), tenta todos os modelos não-Kimi em cascata
+- **Fallback de stall:** se o stream trava após enviar cabeçalhos, tenta os modelos restantes em cascata
+- **Fallback de resposta incompleta:** se o stream termina sem `finish_reason`, anexa o raciocínio do modelo como contexto e tenta os modelos restantes
 - **Backoff inteligente:** escala progressiva em erros 5xx, respeito a `Retry-After` em 429, DEGRADED tratado como 429
+- **Timeout adaptativo:** ajusta dinamicamente os timeouts de conexão e stream por endpoint com base no tempo real de resposta
 - **Synthetic SSE errors:** todos os erros emitem stream SSE com `finish_reason: 'stop'` + `[DONE]` — sem travar o OpenCode
 - **Filtros SSE:** CJK stripping (opt-in), merge de `tool_calls`, limpeza de `tool_calls: []`
 - **Rate limiting:** RPM global configurável + controle de concorrência
@@ -22,16 +24,18 @@ Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) p
 |---|---|
 | 1º | **GLM-5.2** (Thinking) |
 | 2º | **DeepSeek V4 Pro** (Thinking) |
-| 3º | **Kimi K2.6** |
-| 4º | **MiniMax M3** (Thinking) |
+| 3º | **MiniMax M3** (Thinking) |
+| 4º | **DeepSeek V4 Flash** (Thinking) |
 
 > A ordem é fixa. A cada requisição, o último modelo usado é pulado (anti-repetição).
+
+> **AIHubMix:** o proxy tem suporte a um segundo provider (AIHubMix) com modelos como GPT-5.5 e MiMo. Os modelos AIHubMix estão comentados na cascata por padrão — basta descomentar em `src/cascade.js` e configurar as chaves no `.env` para reativar.
 
 ## Início rápido
 
 ### 1. Pré-requisitos
 
-- [Node.js](https://nodejs.org/) 18+ (usa `fetch` nativo)
+- [Node.js](https://nodejs.org/) 20+ (usa `process.loadEnvFile`, `import.meta.dirname` e `fetch` nativo)
 - Chaves de API NVIDIA ([build.nvidia.com](https://build.nvidia.com/))
 - [OpenCode](https://opencode.ai) instalado
 
@@ -77,13 +81,16 @@ O `opencode.jsonc` neste repo já está configurado. O proxy faz hot-reload auto
 | `NVIDIA_KEY_1` | — | Chave de API NVIDIA (obrigatória) |
 | `NVIDIA_KEY_2` | — | Chave de API NVIDIA (opcional) |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com` | Base URL da API NVIDIA |
+| `AIHUBMIX_KEY_1` | — | Chave de API AIHubMix (opcional) |
+| `AIHUBMIX_KEY_2` | — | Chave de API AIHubMix (opcional) |
+| `AIHUBMIX_BASE_URL` | `https://aihubmix.com` | Base URL da API AIHubMix |
 | `PROXY_TARGET_RPM` | 40 | Rate limit global (requests/min) |
-| `PROXY_CONN_TIMEOUT_MS` | 60000 | Timeout de conexão inicial (ms) |
-| `PROXY_STREAM_TIMEOUT_MS` | 90000 | Timeout de silêncio no stream (ms) |
-| `PROXY_MAX_CONCURRENT` | 1 | Requisições simultâneas |
+| `PROXY_CONN_TIMEOUT_MS` | 30000 | Timeout de conexão inicial (ms) |
+| `PROXY_STREAM_TIMEOUT_MS` | 60000 | Timeout de silêncio no stream (ms) |
+| `PROXY_MAX_CONCURRENT` | 4 | Requisições simultâneas |
 | `PROXY_PORT` | 9999 | Porta do proxy |
 | `PROXY_HOST` | 127.0.0.1 | Host do proxy |
-| `PROXY_STRIP_CJK` | 0 | Remove CJK do stream (1 = ligado) |
+| `PROXY_STRIP_CJK` | 1 | Remove CJK do stream (1 = ligado) |
 | `PROXY_TEST_MODE` | 0 | Mock keys para testes (1 = ligado) |
 
 ## Endpoints administrativos
@@ -100,15 +107,15 @@ O `opencode.jsonc` neste repo já está configurado. O proxy faz hot-reload auto
 | `D` | Liga/desliga modo debug (`debug.log`) |
 | `Ctrl+C` | Encerra o proxy (foreground) |
 
-## Comportamento do fallback Kimi
+## Fallback de resposta incompleta
 
-O Kimi K2.6 às vezes retorna apenas `reasoning_content` sem `content`. Quando isso acontece:
+Qualquer modelo pode terminar o stream sem enviar `finish_reason` (conexão cortada, erro interno do provider, etc.). Quando isso acontece:
 
-1. Proxy detecta que Kimi não emitiu resposta real
-2. Coleta o raciocínio do Kimi como contexto
-3. Tenta todos os modelos não-Kimi disponíveis em cascata
-4. Passa o raciocínio do Kimi junto com a mensagem original
-5. Cliente recebe resposta completa do modelo de fallback
+1. O proxy detecta a ausência de `finish_reason` ao final do stream
+2. Coleta o `reasoning_content` acumulado do modelo que falhou
+3. Clona o body original e anexa o raciocínio como contexto na última mensagem do usuário, com a instrução: *"use como referência, mas verifique e questione antes de confiar"*
+4. Tenta todos os modelos restantes em cascata (mesma key + key alternativa)
+5. O cliente recebe a resposta completa do modelo de fallback, com o stream ID preservado
 
 ## Estrutura do projeto
 
@@ -124,17 +131,19 @@ Proxy-Opencode-Router/
 ├── LICENSE
 ├── AGENTS.md
 ├── README.md
+├── docs/
+│   └── kimi-only.md      # Lógica Kimi removida (referência histórica)
 └── src/
     ├── cascade.js        # Cascata de prioridade fixa
     ├── handler.js        # Handler principal
     ├── state.js          # Backoff, RPM, concorrência
-    ├── providers.js      # Chaves NVIDIA
+    ├── providers.js      # Providers e chaves (NVIDIA + AIHubMix)
     ├── config.js         # Loader de .env, hot-reload
     ├── constants.js      # Headers, regex, safe keys
     ├── prepare.js        # Preparação do body
     ├── normalize.js      # Normalização SSE, CJK
     ├── logger.js         # Logging e debug
-    └── metrics.js        # /health e /metrics
+    └── metrics.js        # Contadores para /metrics
 ```
 
 ## Licença
