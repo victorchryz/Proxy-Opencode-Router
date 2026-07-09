@@ -18,7 +18,7 @@ const PROVIDER_LABEL = { nvidia: 'NVDA', aihubmix: 'AHM' };
 
 const MODEL_COLORS = {
   'glm-5.2': '\x1b[36m',
-  'kimi-k2.6': '\x1b[35m',
+  // 'kimi-k2.6': '\x1b[35m',
   'deepseek-v4-pro': '\x1b[34m',
   'minimax-m3': '\x1b[31m',
   'gpt-5.5': '\x1b[32m',

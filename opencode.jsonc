@@ -14,36 +14,36 @@
       "models": {
         "z-ai/glm-5.2": {
           "name": "GLM-5.2 (Nvidia)",
-          "limit": {"context": 202752, "output": 32768},
+          "limit": {"context": 200000, "output": 32768},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 32768,
             "reasoning_effort": "max",
             "chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
           }
         },
-        "moonshotai/kimi-k2.6": {
+        /*"moonshotai/kimi-k2.6": {
           "name": "Kimi K2.6 (Nvidia)",
-          "limit": {"context": 200000, "output": 65536},
+          "limit": {"context": 200000, "output": 32768},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
-            "max_tokens": 65536,
+            "top_p": 0.95,
+            "max_tokens": 32768,
             "chat_template_kwargs": {"thinking": true},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
           }
-        },
+        },*/
         "deepseek-ai/deepseek-v4-pro": {
           "name": "DeepSeek V4 Pro (Nvidia)",
-          "limit": {"context": 202752, "output": 16384},
+          "limit": {"context": 200000, "output": 16384},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 16384,
             "reasoning_effort": "max",
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
@@ -51,11 +51,11 @@
         },
         "deepseek-ai/deepseek-v4-flash": {
           "name": "DeepSeek V4 Flash (Nvidia)",
-          "limit": {"context": 202752, "output": 16384},
+          "limit": {"context": 200000, "output": 16384},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 16384,
             "reasoning_effort": "max",
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
@@ -63,11 +63,11 @@
         },
         "minimaxai/minimax-m3": {
           "name": "MiniMax M3 (Nvidia)",
-          "limit": {"context": 202752, "output": 16384},
+          "limit": {"context": 200000, "output": 16384},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 16384,
             "chat_template_kwargs": {"thinking_mode": "adaptive"},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
@@ -75,7 +75,7 @@
         },
         "gpt-5.5-free": {
           "name": "GPT-5.5 Free (AIHubMix)",
-          "limit": {"context": 202752, "output": 128000},
+          "limit": {"context": 200000, "output": 128000},
           "options": {
             "stream": true,
             "max_tokens": 128000,
@@ -85,11 +85,11 @@
         },
         "coding-glm-5.2-free": {
           "name": "Coding GLM-5.2 Free (AIHubMix)",
-          "limit": {"context": 202752, "output": 32768},
+          "limit": {"context": 200000, "output": 32768},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 32768,
             "reasoning_effort": "max",
             "chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false},
@@ -98,11 +98,11 @@
         },
         "xiaomi-mimo-v2.5-pro-free": {
           "name": "Xiaomi MiMo V2.5 Pro Free (AIHubMix)",
-          "limit": {"context": 202752, "output": 16384},
+          "limit": {"context": 200000, "output": 16384},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 16384,
             "thinking": {"type": "enabled"},
             "reasoning_effort": "high",
@@ -111,11 +111,11 @@
         },
         "coding-minimax-m3-free": {
           "name": "Coding MiniMax M3 Free (AIHubMix)",
-          "limit": {"context": 202752, "output": 13100},
+          "limit": {"context": 200000, "output": 13100},
           "options": {
             "stream": true,
             "temperature": 0.7,
-            "top_p": 0.9,
+            "top_p": 0.95,
             "max_tokens": 13100,
             "thinking": {"type": "adaptive"},
             "stream_options": {"include_usage": true, "continuous_usage_stats": true}
