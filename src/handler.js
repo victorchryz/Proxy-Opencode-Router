@@ -126,10 +126,14 @@ async function readBody(req) {
  * stream stalls or aborts before producing any useful content, the caller can
  * silently fall back to the next cascade endpoint without the client noticing.
  *
+ * The finish_reason chunk and [DONE] marker are retained (not sent immediately)
+ * so the caller can decide whether to emit them or trigger a fallback after the
+ * stream ends (e.g. when the response is incomplete — no finish_reason).
+ *
  * @param {import('http').ServerResponse} res
  * @param {Record<string,string>} resHeaders — upstream response headers (already
  *   filtered of hop-by-hop). Only used if we actually writeHead.
- * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean }>}
+ * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean, stalled: boolean, streamId: string|null, maxChunkGap: number, contentBuf: string, reasoningBuf: string, finishReason: string|null, finishChunkBuf: string|null, doneBuf: string|null }>}
  */
 async function pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef, streamIdOverride = null) {
   let sseBuffer = '';
@@ -139,6 +143,11 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
   let streamId = streamIdOverride;
   let maxChunkGap = 0;
   let lastChunkTime = Date.now();
+  let contentBuf = '';
+  let reasoningBuf = '';
+  let finishReason = null;
+  let finishChunkBuf = null;
+  let doneBuf = null;
   /** @type {string[]} */
   const pendingChunks = [];
   chunkTimer.reset();
@@ -149,10 +158,25 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
       if (idMatch) streamId = idMatch[1];
     }
 
+    if (eventStr.trim() === 'data: [DONE]') {
+      doneBuf = eventStr;
+      return;
+    }
+
+    let parsed = null;
+    if (eventStr.startsWith('data: ')) {
+      try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch {}
+    }
+    const choice = parsed?.choices?.[0];
+    const delta = choice?.delta;
+    const finish = choice?.finish_reason;
+
+    if (delta) {
+      if (typeof delta.content === 'string') contentBuf += delta.content;
+      if (typeof delta.reasoning_content === 'string') reasoningBuf += delta.reasoning_content;
+    }
+
     if (!headersSent) {
-      let parsed;
-      try { parsed = JSON.parse(eventStr.substring(6).trim()); } catch { parsed = null; }
-      const delta = parsed?.choices?.[0]?.delta;
       if (delta && ((typeof delta.content === 'string' && delta.content.trim()) || (Array.isArray(delta.tool_calls) && delta.tool_calls.length) || (typeof delta.reasoning_content === 'string' && delta.reasoning_content.trim()))) {
         headersSent = true;
         hadUsefulContent = true;
@@ -168,6 +192,12 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     let out = injectModelTag(eventStr, endpoint.model, tagState);
     if (streamIdOverride) {
       out = out.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${streamIdOverride}"`);
+    }
+
+    if (finish) {
+      finishReason = finish;
+      finishChunkBuf = out;
+      return;
     }
 
     if (headersSent) {
@@ -212,11 +242,10 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
 
   if (!stalled && sseBuffer.trim() && !clientDisconnectedRef.value) {
     const trimmed = sseBuffer.trim();
-    if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
-      try {
-        JSON.parse(trimmed.substring(6).trim());
-      } catch {
-        console.warn(`${ts()} [STREAM] Frame parcial (JSON inválido) — enviando mesmo assim.`);
+    if (trimmed.startsWith('data: ')) {
+      if (trimmed !== 'data: [DONE]') {
+        try { JSON.parse(trimmed.substring(6).trim()); }
+        catch { console.warn(`${ts()} [STREAM] Frame parcial (JSON inválido) — enviando mesmo assim.`); }
       }
       sseBuffer = normalizeSSEEvent(sseBuffer);
       debug(`[UPSTREAM -> PROXY] ${sseBuffer}`);
@@ -224,7 +253,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     }
   }
 
-  return { hadUsefulContent, headersSent, stalled, streamId, maxChunkGap };
+  return { hadUsefulContent, headersSent, stalled, streamId, maxChunkGap, contentBuf, reasoningBuf, finishReason, finishChunkBuf, doneBuf };
 }
 
 async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientDisconnectedRef) {
@@ -259,6 +288,10 @@ async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId,
 
     const tagState = newTagState();
     const result = await pumpStream(response, res, {}, nextEp, tagState, controller, chunkTimer, clientDisconnectedRef, stallStreamId);
+    if (!result.stalled) {
+      if (result.finishChunkBuf) await writeSSE(res, result.finishChunkBuf + '\n\n');
+      if (!res.__doneSent && result.doneBuf) await writeSSE(res, result.doneBuf + '\n\n');
+    }
     return !result.stalled;
   } catch (err) {
     clearTimeout(initialTimer);
@@ -469,7 +502,7 @@ export async function handleRequest(req, res) {
                 throw streamErr;
               }
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
-              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null, maxChunkGap: 0 };
+              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null, maxChunkGap: 0, contentBuf: '', reasoningBuf: '', finishReason: null, finishChunkBuf: null, doneBuf: null };
             } finally {
               chunkTimer.clear();
             }
@@ -496,7 +529,8 @@ export async function handleRequest(req, res) {
             }
 
             if (!res.writableEnded) {
-              if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+              if (streamResult.finishChunkBuf) await writeSSE(res, streamResult.finishChunkBuf + '\n\n');
+              if (!res.__doneSent && streamResult.doneBuf) await writeSSE(res, streamResult.doneBuf + '\n\n');
               res.end();
             }
             recordRequest(endpoint.model, Date.now() - attemptStart, false);
