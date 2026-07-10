@@ -134,7 +134,7 @@ async function readBody(req) {
  * @param {import('http').ServerResponse} res
  * @param {Record<string,string>} resHeaders — upstream response headers (already
  *   filtered of hop-by-hop). Only used if we actually writeHead.
- * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean, stalled: boolean, streamId: string|null, maxChunkGap: number, contentBuf: string, reasoningBuf: string, finishReason: string|null, finishChunkBuf: string|null, doneBuf: string|null }>}
+ * @returns {Promise<{ hadUsefulContent: boolean, headersSent: boolean, stalled: boolean, streamId: string|null, maxChunkGap: number, contentBuf: string, reasoningBuf: string, finishReason: string|null, finishChunkBuf: string|null, doneBuf: string|null, hadToolCalls: boolean }>}
  */
 async function pumpStream(response, res, resHeaders, endpoint, tagState, controller, chunkTimer, clientDisconnectedRef, streamIdOverride = null) {
   let sseBuffer = '';
@@ -149,6 +149,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
   let finishReason = null;
   let finishChunkBuf = null;
   let doneBuf = null;
+  let hadToolCalls = false;
   /** @type {string[]} */
   const pendingChunks = [];
   chunkTimer.reset();
@@ -175,6 +176,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     if (delta) {
       if (typeof delta.content === 'string') contentBuf += delta.content;
       if (typeof delta.reasoning_content === 'string') reasoningBuf += delta.reasoning_content;
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) hadToolCalls = true;
     }
 
     if (!headersSent) {
@@ -254,7 +256,7 @@ async function pumpStream(response, res, resHeaders, endpoint, tagState, control
     }
   }
 
-  return { hadUsefulContent, headersSent, stalled, streamId, maxChunkGap, contentBuf, reasoningBuf, finishReason, finishChunkBuf, doneBuf };
+  return { hadUsefulContent, headersSent, stalled, streamId, maxChunkGap, contentBuf, reasoningBuf, finishReason, finishChunkBuf, doneBuf, hadToolCalls };
 }
 
 async function runStallFallback(req, res, parsedOriginal, nextEp, stallStreamId, clientDisconnectedRef) {
@@ -449,7 +451,17 @@ export async function handleRequest(req, res) {
             const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[kIdx]);
             console.log(`${ts()} [INÍCIO] -> ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 
-    const response = await fetch(url, { method: req.method, headers, body: req.method !== 'GET' && req.method !== 'HEAD' ? body : undefined, signal: controller.signal });
+            const response = await Promise.race([
+              fetch(url, { method: req.method, headers, body: req.method !== 'GET' && req.method !== 'HEAD' ? body : undefined, signal: controller.signal }),
+              new Promise((_, reject) => {
+                const h = setTimeout(() => {
+                  console.warn(`${ts()} [WATCHDOG] fetch pendurado após ${currentConnTimeout + 5000}ms em ${visualTag(endpoint.provider, endpoint.model, kIdx)} — forçando reject.`);
+                  controller.abort();
+                  reject(new Error('WATCHDOG_TIMEOUT'));
+                }, currentConnTimeout + 5000);
+                h.unref?.();
+              }),
+            ]);
             clearTimeout(initialTimer);
             gotResponseHeaders = true;
             console.log(
@@ -507,7 +519,7 @@ export async function handleRequest(req, res) {
                 throw streamErr;
               }
               console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
-              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null, maxChunkGap: 0, contentBuf: '', reasoningBuf: '', finishReason: null, finishChunkBuf: null, doneBuf: null };
+              streamResult = { hadUsefulContent: false, headersSent: false, stalled: false, streamId: null, maxChunkGap: 0, contentBuf: '', reasoningBuf: '', finishReason: null, finishChunkBuf: null, doneBuf: null, hadToolCalls: false };
             } finally {
               chunkTimer.clear();
             }
@@ -541,6 +553,17 @@ export async function handleRequest(req, res) {
               }
               recordRequest(endpoint.model, Date.now() - attemptStart, false);
               requestComplete = true;
+            } else if (streamResult.hadToolCalls) {
+              // tool_calls parciais já foram enviados ao cliente — fallback cortaria
+              // a tool_call no meio, deixando o OpenCode esperando. Encerrar stream
+              // com o que temos em vez de cair em outro modelo.
+              console.warn(`${ts()} [INCOMPLETO+TOOL_CALLS] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream terminou sem finish_reason mas tool_calls já foram emitidos. Encerrando sem fallback.`);
+              if (!res.writableEnded) {
+                if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+                res.end();
+              }
+              recordRequest(endpoint.model, Date.now() - attemptStart, true);
+              requestComplete = true;
             } else {
               console.log(`${ts()} [INCOMPLETO] ${visualTag(endpoint.provider, endpoint.model, kIdx)} — stream terminou sem finish_reason, acionando fallback.`);
               attemptsLog[attemptsLog.length - 1] = `INCOMPLETE ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
@@ -554,7 +577,7 @@ export async function handleRequest(req, res) {
           } catch (fetchErr) {
             clearTimeout(initialTimer);
             chunkTimer.clear();
-            const isAbort = fetchErr?.name === 'AbortError';
+            const isAbort = fetchErr?.name === 'AbortError' || fetchErr?.message === 'WATCHDOG_TIMEOUT';
             if (isAbort) {
               if (!clientRef.value) {
                 console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);

@@ -1,6 +1,6 @@
 {
-  "name": "nvidia-opencode-proxy",
-  "version": "3.9.7",
+  "name": "opencode-free-router",
+  "version": "3.10.1",
   "description": "Clean, robust OpenCode <-> NVIDIA API proxy with cascade fallback, backoff, RPM limiter and SSE tagging.",
   "type": "module",
   "main": "index.js",

@@ -1,6 +1,6 @@
-# AGENTS.md — Proxy-Opencode-Router
+# AGENTS.md — OpenCode-Free-Router
 
-Proxy HTTP modular que roteia requisições OpenCode → NVIDIA API com cascata
+Proxy HTTP que roteia requisições OpenCode → NVIDIA API com cascata
 de prioridade fixa, anti-repetição cross-key e fallback automático.
 
 ## Regras gerais
@@ -8,12 +8,15 @@ de prioridade fixa, anti-repetição cross-key e fallback automático.
 - **Idioma:** sempre use **pt-br** em documentação, comentários, mensagens de
   commit e comunicação.
 - **Commits:** faça commit + push após cada modificação funcional.
-- **Sem comentários:** não adicione comentários no código a menos que solicitado.
+- **Verificação pré-commit:** antes de fazer commit, rode `git status` para
+  conferir se há outros arquivos modificados além dos que você pretende
+  commitar. Se houver, pergunte ao usuário se devem ir no mesmo commit ou
+  em separado.
 - **Não delete:** nunca delete diretório ou arquivo sem confirmação explícita
   do usuário.
 - **Não instale:** nunca instale pacotes, dependências ou ferramentas sem
   confirmação explícita do usuário. Após qualquer instalação, liste o que foi
-  instalado para que possa ser removido quando não for mais necessário.
+  instalado para futura desinstalação quando não for mais necessário.
 - **Versionamento:** a cada modificação funcional, atualize a versão no banner
   de inicialização do proxy (formato: `v1.0.1`, `v1.1.0`, etc.).
 
@@ -38,7 +41,7 @@ node index.js          # foreground
 ## Estrutura do projeto
 
 ```
-Proxy-Opencode-Router/
+OpenCode-Free-Router/
 ├── index.js              # Entry point
 ├── package.json
 ├── start.sh              # Launcher interativo (foreground/daemon)
@@ -56,7 +59,7 @@ Proxy-Opencode-Router/
     ├── providers.js      # Definições de providers e chaves
     ├── config.js         # Loader de .env e hot-reload do opencode.jsonc
     ├── constants.js      # HOP_BY_HOP headers, TAG_RE, SAFE_MODEL_OPTION_KEYS
-    ├── prepare.js        # Preparação do body (tags, Kimi extra rules)
+    ├── prepare.js        # Preparação do body (tags, extra rules)
     ├── normalize.js      # Normalização SSE, strip CJK (opt-in)
     ├── logger.js         # Logging e debug mode
     └── metrics.js        # Endpoints /health e /metrics
@@ -82,8 +85,6 @@ Proxy-Opencode-Router/
 
 ### Cascata com prioridade fixa
 
-Ordem fixa de preferência: `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
-
 - **Alternância K1↔K2:** `globalKeyToggle` alterna a chave a cada request
 - **lastUsedModel:** anti-repetição — se o modelo usado na última requisição
   bem-sucedida é o primeiro da lista, ele é pulado e o próximo é usado
@@ -106,13 +107,12 @@ Ordem fixa de preferência: `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minim
 
 Todos os erros que antes retornavam JSON (500/429/503/abort) agora emitem um
 **stream SSE sintético** com mensagem de erro como conteúdo +
-`finish_reason: 'stop'` + `[DONE]`. Isso evita que o OpenCode trave esperando
-o usuário digitar `.` para continuar.
+`finish_reason: 'stop'` + `[DONE]`.
 
-### Fallback Kimi
+### Fallback
 
-Se Kimi retorna só `reasoning_content` (sem `content`/`tool_calls`), o proxy
-tenta todos os modelos não-Kimi disponíveis em cascata. O raciocínio do Kimi
+Se Modelo retorna só `reasoning_content` (sem `content`/`tool_calls`), o proxy
+tenta todos os modelos disponíveis em cascata. O raciocínio do Modelo
 é passado como contexto para o fallback.
 
 ### Filtros SSE

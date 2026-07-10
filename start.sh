@@ -36,7 +36,7 @@ case "${1:-}" in
     # Sem argumentos: mostra menu interativo
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     🚀 nvidia-opencode-proxy — Inicialização ║${NC}"
+    echo -e "${CYAN}║     🚀 OpenCode-Free-Router — Inicialização ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
     echo ""
     echo "Como deseja executar o proxy?"

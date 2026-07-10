@@ -1,6 +1,6 @@
-# Proxy-Opencode-Router
+# OpenCode-Free-Router
 
-Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) para a API da NVIDIA, com cascata de prioridade fixa, anti-repetição cross-key e fallback automático.
+Proxy HTTP que roteia requisições do [OpenCode](https://opencode.ai) para a API da NVIDIA, com cascata de prioridade fixa, anti-repetição cross-key e fallback automático.
 
 ## Funcionalidades
 
@@ -120,7 +120,7 @@ Qualquer modelo pode terminar o stream sem enviar `finish_reason` (conexão cort
 ## Estrutura do projeto
 
 ```
-Proxy-Opencode-Router/
+OpenCode-Free-Router/
 ├── index.js              # Entry point
 ├── package.json
 ├── start.sh              # Launcher interativo (foreground/daemon)
