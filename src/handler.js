@@ -14,6 +14,7 @@ import {
   blockedEndpoints,
   earliestUnblockMs,
   activeCount,
+  applyTimeoutCeilingBackoff,
 } from './state.js';
 import { buildDynamicCascade, buildCascadeForKey, setLastUsedModel } from './cascade.js';
 import {
@@ -557,13 +558,11 @@ export async function handleRequest(req, res) {
             if (isAbort) {
               if (!clientRef.value) {
                 console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
-                if (gotResponseHeaders) {
-                  state.streamTimeout = Math.min(90000, Math.round(state.streamTimeout * 1.5));
-                  console.warn(`${ts()} [ADAPTATIVO] Janela STREAM de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.streamTimeout}ms.`);
-                } else {
-                  state.connectTimeout = Math.min(75000, Math.round(state.connectTimeout * 1.5));
-                  console.warn(`${ts()} [ADAPTATIVO] Janela CONEXÃO de ${visualTag(endpoint.provider, endpoint.model, kIdx)} expandida para ${state.connectTimeout}ms.`);
-                }
+                applyTimeoutCeilingBackoff(
+                  state,
+                  visualTag(endpoint.provider, endpoint.model, kIdx),
+                  gotResponseHeaders,
+                );
               }
             } else {
               console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);

@@ -121,6 +121,41 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   return false;
 }
 
+/** Adaptive timeout ceilings (ms). */
+const CONNECT_CEILING = 75000;
+const STREAM_CEILING = 90000;
+
+/**
+ * When an adaptive timeout abort hits its ceiling (can't expand further),
+ * apply the BACKOFF_MINUTES schedule to block the endpoint instead of
+ * retrying it at the ceiling forever.
+ *
+ * @returns {boolean} `true` when backoff was applied (model is now blocked),
+ *   `false` when the timeout was expanded normally.
+ */
+export function applyTimeoutCeilingBackoff(state, tag, gotResponseHeaders) {
+  const ceiling = gotResponseHeaders ? STREAM_CEILING : CONNECT_CEILING;
+  const current = gotResponseHeaders ? state.streamTimeout : state.connectTimeout;
+  const expanded = Math.min(ceiling, Math.round(current * 1.5));
+
+  if (expanded === current) {
+    const waitMin = BACKOFF_MINUTES[state.backoffIndex] ?? 60;
+    state.blockedUntil = Date.now() + waitMin * 60 * 1000;
+    state.backoffIndex = Math.min(state.backoffIndex + 1, BACKOFF_MINUTES.length - 1);
+    console.warn(
+      `${ts()} [ADAPTATIVO→BLOQUEIO] ${tag} atingiu teto ${gotResponseHeaders ? 'STREAM' : 'CONEXÃO'} (${current}ms). Bloqueado por ${waitMin} min (backoff ${state.backoffIndex}).`,
+    );
+    return true;
+  }
+
+  if (gotResponseHeaders) state.streamTimeout = expanded;
+  else state.connectTimeout = expanded;
+  console.warn(
+    `${ts()} [ADAPTATIVO] Janela ${gotResponseHeaders ? 'STREAM' : 'CONEXÃO'} de ${tag} expandida para ${expanded}ms.`,
+  );
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency slots
 // ---------------------------------------------------------------------------
