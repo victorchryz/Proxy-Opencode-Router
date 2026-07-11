@@ -472,20 +472,26 @@ export async function handleRequest(req, res) {
           const tagState = newTagState();
           const streamState = newStreamState();
 
+          let streamAborted = false;
           try {
             await pumpStream(response, res, endpoint, tagState, streamState, chunkTimer, clientRef);
           } catch (streamErr) {
+            streamAborted = true;
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
             if (streamState.headersSent) {
               const hasContent = streamState.contentBuf.trim().length > 0;
               const hasReasoning = streamState.reasoningBuf.trim().length > 0;
+              const hasNothing = !hasContent && !hasReasoning;
               console.log(`${ts()} [STREAM-FIM] contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length} toolCalls=${streamState.emittedAnswer} clientGone=${clientRef.value}`);
               if (!clientRef.value) {
                 if (hasReasoning && !hasContent) {
                   streamState.needsFallback = true;
                   console.log(`${ts()} [${endpoint.name}] Só reasoning sem content — acionando fallback.`);
+                } else if (streamAborted && hasNothing) {
+                  streamState.needsFallback = true;
+                  console.log(`${ts()} [${endpoint.name}] Stream abortado sem conteúdo útil — acionando fallback.`);
                 } else {
                   console.log(`${ts()} [${endpoint.name}] Resposta considerada completa (sem fallback).`);
                 }
