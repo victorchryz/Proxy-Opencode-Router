@@ -1,6 +1,6 @@
 // src/cascade.js
 // Dynamic cascade builder: alternates NVIDIA keys and uses a fixed model
-// priority (GLM → DS → KIMI → MM) with anti-repetition (lastUsedModel).
+// priority (GLM → DS → MM) with anti-repetition per-key (lastUsedModel+Key).
 
 import { getState } from './state.js';
 
@@ -8,25 +8,22 @@ import { getState } from './state.js';
 
 /**
  * Short slug  ->  { provider, model }.
- * Fixed priority order: GLM > DS > KIMI > MM.
+ * Fixed priority order: GLM > DS > MM.
  */
 export const MODEL_MAP = {
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
-  'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
-  'kimi-k2.6': { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
   'minimax-m3': { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
+  'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
 };
 
 const DEFAULT_ORDER = Object.keys(MODEL_MAP);
 
 // Alternates the starting physical key (0 / 1) per request.
 let _globalKeyToggle = 1;
-export function getGlobalKeyToggle() { return _globalKeyToggle; }
 
-// Tracks the last model that responded successfully (anti-repetition).
 let _lastUsedModel = null;
-export function getLastUsedModel() { return _lastUsedModel; }
-export function setLastUsedModel(v) { _lastUsedModel = v; }
+let _lastUsedKey = null;
+export function setLastUsedModel(v, keyIdx) { _lastUsedModel = v; _lastUsedKey = keyIdx; }
 
 /** Look up a model definition by short slug. */
 function getModelDef(name) {
@@ -38,8 +35,8 @@ function getModelDef(name) {
  * Build the cascade for the next request.
  *
  * - Alternates K1↔K2 via globalKeyToggle.
- * - Walks DEFAULT_ORDER (GLM → DS → KIMI → MM) skipping:
- *     1. lastUsedModel (anti-repetition)
+ * - Walks DEFAULT_ORDER (GLM → DS → MM) skipping:
+ *     1. lastUsedModel on the SAME key (anti-repetition per-key)
  *     2. models blocked on the start key
  * - If nothing available on start key, tries the other key (same priority).
  * - If nothing available on either key, absolute fallback: GLM on start key
@@ -58,7 +55,7 @@ export function buildDynamicCascade(provider) {
     DEFAULT_ORDER
       .map(getModelDef)
       .filter(Boolean)
-      .filter((m) => m.name !== _lastUsedModel)
+      .filter((m) => !(m.name === _lastUsedModel && keyIdx === _lastUsedKey))
       .filter((m) => {
         const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
         return now >= s.blockedUntil;

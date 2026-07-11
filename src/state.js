@@ -5,21 +5,18 @@
 import { ENV, MIN_INTERVAL_MS } from './config.js';
 import { ts } from './logger.js';
 
-/** @typedef {{ blockedUntil: number, backoffIndex: number }} EndpointState */
-
-const MAX_CONCURRENT = ENV.maxConcurrent;
-const TARGET_RPM = ENV.targetRpm;
+/** @typedef {{ blockedUntil: number, backoffIndex: number, connectTimeout: number, streamTimeout: number }} EndpointState */
 
 /** Backoff schedule (minutes) for retryable upstream errors.
- *  Starts at 1 min (gentle first retry for transient 5xx) and grows to 1h. */
-const BACKOFF_MINUTES = [1, 2, 3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
+ *  Starts at 2 min and grows to 1h. */
+const BACKOFF_MINUTES = [2, 3, 5, 10, 15, 20, 30, 60];
 
 /** @type {Record<string, EndpointState>} */
 const endpointState = {};
 
 /** Get (or create) the state slot for a given endpoint id. */
 export function getState(id) {
-  if (!endpointState[id]) endpointState[id] = { blockedUntil: 0, backoffIndex: 0 };
+  if (!endpointState[id]) endpointState[id] = { blockedUntil: 0, backoffIndex: 0, connectTimeout: ENV.connTimeoutMs, streamTimeout: ENV.streamTimeoutMs };
   return endpointState[id];
 }
 
@@ -90,10 +87,9 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   // Escalating ensures we don't waste cascade budget by
   // retrying too early and getting another 429 that just renews the window.
   if (status === 429) {
-    const RATE_LIMIT_BACKOFF_MIN = [1, 2, 3, 5, 7, 8, 9, 10, 15, 20, 30, 60];
-    const waitMin = RATE_LIMIT_BACKOFF_MIN[state.backoffIndex] ?? 60;
+    const waitMin = BACKOFF_MINUTES[state.backoffIndex] ?? 60;
     state.blockedUntil = Date.now() + waitMin * 60 * 1000;
-    state.backoffIndex = Math.min(state.backoffIndex + 1, RATE_LIMIT_BACKOFF_MIN.length - 1);
+    state.backoffIndex = Math.min(state.backoffIndex + 1, BACKOFF_MINUTES.length - 1);
     console.log(
       `${ts()} [RATE-LIMIT] 429 sem Retry-After. ${tag} bloqueado por ${waitMin} min (backoff ${state.backoffIndex}).`,
     );
@@ -115,6 +111,32 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   return false;
 }
 
+const CONNECT_CEILING = 45000;
+const STREAM_CEILING = 60000;
+
+export function applyTimeoutCeilingBackoff(state, tag, gotResponseHeaders) {
+  const ceiling = gotResponseHeaders ? STREAM_CEILING : CONNECT_CEILING;
+  const current = gotResponseHeaders ? state.streamTimeout : state.connectTimeout;
+  const expanded = Math.min(ceiling, Math.round(current * 1.5));
+
+  if (expanded === current) {
+    const waitMin = BACKOFF_MINUTES[state.backoffIndex] ?? 60;
+    state.blockedUntil = Date.now() + waitMin * 60 * 1000;
+    state.backoffIndex = Math.min(state.backoffIndex + 1, BACKOFF_MINUTES.length - 1);
+    console.warn(
+      `${ts()} [ADAPTATIVO→BLOQUEIO] ${tag} atingiu teto ${gotResponseHeaders ? 'STREAM' : 'CONEXÃO'} (${current}ms). Bloqueado por ${waitMin} min (backoff ${state.backoffIndex}).`,
+    );
+    return true;
+  }
+
+  if (gotResponseHeaders) state.streamTimeout = expanded;
+  else state.connectTimeout = expanded;
+  console.warn(
+    `${ts()} [ADAPTATIVO] Janela ${gotResponseHeaders ? 'STREAM' : 'CONEXÃO'} de ${tag} expandida para ${expanded}ms.`,
+  );
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency slots
 // ---------------------------------------------------------------------------
@@ -130,7 +152,7 @@ const waitQueue = [];
  */
 export function acquireSlot(req) {
   return new Promise((resolve) => {
-    if (activeRequests < MAX_CONCURRENT) {
+    if (activeRequests < ENV.maxConcurrent) {
       activeRequests++;
       return resolve(true);
     }
@@ -177,7 +199,7 @@ export async function enforceTimeLimit() {
   const wait = MIN_INTERVAL_MS - (now - lastGlobalRequestMono);
   if (wait > 0) {
     lastGlobalRequestMono = now + wait;
-    console.log(`${ts()} [LIMITE] Segurando por ${Math.round(wait)}ms (${TARGET_RPM} RPM)`);
+    console.log(`${ts()} [LIMITE] Segurando por ${Math.round(wait)}ms (${ENV.targetRpm} RPM)`);
     await new Promise((r) => setTimeout(r, wait));
   } else {
     lastGlobalRequestMono = now;

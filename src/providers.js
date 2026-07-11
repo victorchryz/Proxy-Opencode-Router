@@ -38,7 +38,3 @@ export function assertProvidersConfigured() {
   }
 }
 
-/** Total number of physical keys across all providers (for logging). */
-export function totalKeyCount() {
-  return Object.values(PROVIDERS).reduce((sum, p) => sum + p.keys.length, 0);
-}

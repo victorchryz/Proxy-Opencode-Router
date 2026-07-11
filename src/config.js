@@ -5,37 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ---------------------------------------------------------------------------
-// Minimal .env loader (no external deps). Bun loads .env natively; Node does
-// not, so we do it ourselves. Only sets vars that aren't already defined.
-// ---------------------------------------------------------------------------
-function loadDotEnv() {
-  const envPath = path.join(__dirname, '..', '.env');
-  let raw;
-  try {
-    raw = fs.readFileSync(envPath, 'utf8');
-  } catch {
-    return; // no .env file — fine, env may come from the shell
-  }
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    // Strip surrounding quotes if present.
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    if (!(key in process.env)) process.env[key] = val;
-  }
-}
-loadDotEnv();
+try { process.loadEnvFile(path.join(import.meta.dirname, '..', '.env')); } catch {}
 
 /** @typedef {Record<string, Record<string, unknown>>} ModelOptionsMap */
 
@@ -56,10 +27,10 @@ const parseIntSafe = (v, def) => {
  *    ser maior. (Default: 40)
  */
 export const ENV = {
-  targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 40),
+  targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 20),
   connTimeoutMs: parseIntSafe(process.env.PROXY_CONN_TIMEOUT_MS, 30000),
-  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 90000),
-  maxConcurrent: parseIntSafe(process.env.PROXY_MAX_CONCURRENT, 1),
+  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 45000),
+  maxConcurrent: parseIntSafe(process.env.PROXY_MAX_CONCURRENT, 2),
   port: parseIntSafe(process.env.PROXY_PORT, 9999),
   host: process.env.PROXY_HOST || '127.0.0.1',
 };
@@ -120,7 +91,7 @@ export function loadModelConfigs() {
  *   the watcher dies — we detect this and retry every 5s until the file
  *   reappears, then re-arm the watcher.
  */
-export function watchModelConfigs(onChange) {
+export function watchModelConfigs() {
   let timer = null;
   let watcher = null;
 
@@ -131,7 +102,6 @@ export function watchModelConfigs(onChange) {
         timer = setTimeout(() => {
           console.log('[config] opencode.jsonc alterado, recarregando...');
           loadModelConfigs();
-          onChange?.();
         }, 1000);
       });
       watcher.on('error', (err) => {

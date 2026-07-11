@@ -33,7 +33,15 @@ export const HOP_BY_HOP = new Set([
  * `[Fallback: ...]`. Used to strip stale tags from message content before
  * re-sending upstream (so the model doesn't see tags from a previous model).
  */
-export const TAG_RE = /\[Pensamento: [^\]]+\]\n*|\[Resposta: [^\]]+\]\n*|\[Fallback: [^\]]+\]\n*/g;
+export const TAG_RE = /\[Pensamento: [^\]]+\]|\[Resposta: [^\]]+\]|\[Fallback: [^\]]+\]/g;
+
+/**
+ * Regex matching context-overflow error messages from upstream providers.
+ * Mirrors OpenCode's `isContextOverflow` patterns so the proxy can detect
+ * 400 responses that should be propagated as-is (HTTP 400) instead of
+ * masked as synthetic SSE 200, letting OpenCode auto-compact the conversation.
+ */
+export const CONTEXT_OVERFLOW_RE = /prompt is too long|input is too long for requested model|exceeds the context window|input token count.*exceeds the maximum|tokens in request more than max tokens allowed|maximum prompt length is \d+|reduce the length of the messages|maximum context length is \d+ tokens|exceeds the limit of \d+|exceeds the available context size|greater than the context length|context window exceeds limit|exceeded model token limit|context[_ ]length[_ ]exceeded|request entity too large|context length is only \d+ tokens|input length.*exceeds.*context length|prompt too long; exceeded (?:max )?context length|too large for model with \d+ maximum context length|model_context_window_exceeded/i;
 
 /**
  * Allowlist of opencode.jsonc option keys that are safe to forward to the

@@ -11,6 +11,7 @@ import {
   enforceTimeLimit,
   getState,
   applyBackoff,
+  applyTimeoutCeilingBackoff,
   blockedEndpoints,
   earliestUnblockMs,
   activeCount,
@@ -20,12 +21,12 @@ import {
   normalizeSSEEvent,
   injectModelTag,
   newTagState,
-  newKimiState,
+  newStreamState,
 } from './normalize.js';
 import { createProxyHeaders, buildFetchOptions, prepareBody } from './prepare.js';
 import { recordRequest, snapshot as metricsSnapshot } from './metrics.js';
 import { ts, visualTag, debug, isDebug } from './logger.js';
-import { HOP_BY_HOP } from './constants.js';
+import { HOP_BY_HOP, CONTEXT_OVERFLOW_RE } from './constants.js';
 
 /**
  * Write an SSE chunk to the client; awaits backpressure drain.
@@ -64,7 +65,6 @@ async function writeSSE(res, data) {
     }
     // Still needs drain after 5s → socket is likely dead. Poison it.
     console.warn(`${ts()} [STREAM] Drain timeout (5s) — socket provavelmente morto, parando writes.`);
-    res.__poisoned = true;
     try { res.destroy(); } catch { /* ignore */ }
     return false;
   }
@@ -101,6 +101,16 @@ async function sendSyntheticChunk(res, streamId, content, model = 'proxy') {
   );
 }
 
+/** Emit a synthetic SSE error stream: writeHead (if needed) + content chunk +
+ *  finish_reason:stop + [DONE] + end. Used by all error/abort paths. */
+async function emitErrorStream(res, id, msg) {
+  if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  await sendSyntheticChunk(res, id, msg);
+  await writeSSE(res, 'data: ' + JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'proxy', choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] }) + '\n\n');
+  if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
+  if (!res.writableEnded) res.end();
+}
+
 /** Read the entire request body into a string. No size cap — both the client
  *  (opencode) and the upstream API (NVIDIA) enforce their own limits. */
 async function readBody(req) {
@@ -111,70 +121,76 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
-/**
- * Stream one upstream response into the client, applying normalization & tags.
- * @returns {Promise<void>}
- */
-async function pumpStream(response, res, endpoint, tagState, kimiState, controller, chunkTimer, clientDisconnectedRef) {
-  const isKimi = endpoint.model.includes('kimi');
+async function* sseEvents(response, chunkTimer, clientRef) {
   let sseBuffer = '';
   chunkTimer.reset();
-
   for await (let chunk of response.body) {
-    if (clientDisconnectedRef.value) break;
+    if (clientRef.value) return;
     chunkTimer.reset();
-
     if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
     sseBuffer += chunk.toString('utf-8');
-
-    // Split into complete events (keep the trailing partial in the buffer).
     const events = sseBuffer.split('\n\n');
     sseBuffer = events.pop() ?? '';
-
-    for (let eventStr of events) {
-      if (!eventStr.trim()) continue;
-
-      if (isKimi && !kimiState.kimiStreamId) {
-        const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
-        if (idMatch) kimiState.kimiStreamId = idMatch[1];
-      }
-
-      eventStr = normalizeSSEEvent(eventStr, isKimi, kimiState);
-      debug(`[NVIDIA -> PROXY] ${eventStr}`);
-      const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
-
-      // For Kimi: defer both the finish chunk AND the [DONE] marker so we can
-      // still emit a fallback if Kimi never produced real content. NVIDIA
-      // sometimes sends [DONE] *before* the finish chunk, so buffering both
-      // guarantees the client sees them in the right order at the end.
-      const isFinish = isKimi && /"finish_reason"\s*:\s*"(?:stop|length|tool_calls)"/.test(eventStr);
-      const isDone = eventStr.trim() === 'data: [DONE]';
-      if (isFinish) {
-        kimiState.kimiFinishChunkBuf = taggedStr;
-      } else if (isKimi && isDone) {
-        kimiState.kimiDoneBuf = taggedStr;
-      } else {
-        const alive = await writeSSE(res, taggedStr + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      }
+    for (const eventStr of events) {
+      const dataLine = eventStr.split('\n').find(l => l.startsWith('data: '));
+      if (dataLine) yield dataLine;
     }
   }
+  if (sseBuffer.trim() && !clientRef.value) {
+    const dataLine = sseBuffer.split('\n').find(l => l.startsWith('data: '));
+    if (dataLine && dataLine.trim() !== 'data: [DONE]') {
+      try { JSON.parse(dataLine.substring(6).trim()); yield dataLine; }
+      catch { /* partial frame — discard */ }
+    }
+  }
+}
 
-  // Flush any leftover partial event — but only if it looks like a complete
-  // SSE frame (starts with "data: " and parses as JSON). Flushing a truncated
-  // frame would send malformed JSON to the client.
-  if (sseBuffer.trim() && !clientDisconnectedRef.value) {
-    const trimmed = sseBuffer.trim();
-    if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
-      try {
-        JSON.parse(trimmed.substring(6).trim());
-        sseBuffer = normalizeSSEEvent(sseBuffer, isKimi, kimiState);
-        debug(`[NVIDIA -> PROXY] ${sseBuffer}`);
-        const { eventStr: taggedStr } = injectModelTag(sseBuffer, endpoint.model, tagState);
-        await writeSSE(res, taggedStr + '\n\n');
-      } catch {
-        // Partial JSON — discard rather than send malformed data.
-        debug(`[NVIDIA -> PROXY] (descartado frame parcial: ${trimmed.slice(0, 80)})`);
+async function pumpStream(response, res, endpoint, tagState, streamState, chunkTimer, clientRef) {
+  const pendingChunks = [];
+  const resHeaders = {};
+  response.headers.forEach((v, k) => {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
+  });
+
+  for await (let eventStr of sseEvents(response, chunkTimer, clientRef)) {
+    if (!streamState.streamId) {
+      const idMatch = eventStr.match(/"id"\s*:\s*"([^"]+)"/);
+      if (idMatch) streamState.streamId = idMatch[1];
+    }
+
+    const contentLenBefore = streamState.contentBuf.length;
+    const reasoningLenBefore = streamState.reasoningBuf.length;
+    eventStr = normalizeSSEEvent(eventStr, streamState);
+    const hadUsefulContent =
+      streamState.contentBuf.length > contentLenBefore ||
+      streamState.reasoningBuf.length > reasoningLenBefore ||
+      streamState.emittedAnswer;
+
+    debug(`[NVIDIA -> PROXY] ${eventStr}`);
+    const { eventStr: taggedStr } = injectModelTag(eventStr, endpoint.model, tagState);
+
+    const isFinish = /"finish_reason"\s*:\s*"(?:stop|length|tool_calls)"/.test(eventStr);
+    const isDone = eventStr.trim() === 'data: [DONE]';
+    if (isFinish) {
+      streamState.finishChunkBuf = taggedStr;
+    } else if (isDone) {
+      streamState.doneBuf = taggedStr;
+    } else {
+      if (hadUsefulContent && !streamState.headersSent) {
+        res.writeHead(response.status, resHeaders);
+        streamState.headersSent = true;
+        for (const pending of pendingChunks) {
+          const alive = await writeSSE(res, pending + '\n\n');
+          if (!alive) { clientRef.value = true; break; }
+        }
+        pendingChunks.length = 0;
+      }
+      if (clientRef.value) break;
+      if (streamState.headersSent) {
+        const alive = await writeSSE(res, taggedStr + '\n\n');
+        if (!alive) { clientRef.value = true; break; }
+      } else {
+        pendingChunks.push(taggedStr);
       }
     }
   }
@@ -184,7 +200,7 @@ async function pumpStream(response, res, endpoint, tagState, kimiState, controll
  * Run a single fallback attempt against `nextEp` and stream it to the client.
  * @returns {Promise<boolean>} `true` if the fallback streamed successfully.
  */
-async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, tagState, fallbackKimiState, clientDisconnectedRef) {
+async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, tagState, fallbackStreamState, clientDisconnectedRef) {
   const provider = PROVIDERS[nextEp.provider];
   const fkIdx = nextEp.physicalKey;
   const url = `${provider.baseUrl}${req.url}`;
@@ -229,41 +245,15 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
 
     getState(`${nextEp.provider}:${nextEp.model}__${fkIdx}`).backoffIndex = 0;
 
-    let sseBuffer = '';
-    const isKimi = nextEp.model.includes('kimi');
-    chunkTimer.reset();
-
-    for await (let chunk of response.body) {
-      if (clientDisconnectedRef.value) break;
-      chunkTimer.reset();
-      if (chunk instanceof Uint8Array) chunk = Buffer.from(chunk);
-      sseBuffer += chunk.toString('utf-8');
-
-      const events = sseBuffer.split('\n\n');
-      sseBuffer = events.pop() ?? '';
-
-      for (let eventStr of events) {
-        if (!eventStr.trim()) continue;
-        eventStr = normalizeSSEEvent(eventStr, isKimi, fallbackKimiState);
-        debug(`[FALLBACK -> PROXY] ${eventStr}`);
-        const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
-        // Preserve the original stream id so the client sees a continuous stream.
-        const out = fallbackKimiState.kimiStreamId
-          ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${fallbackStreamId}"`)
-          : taggedStr;
-        const alive = await writeSSE(res, out + '\n\n');
-        if (!alive) { clientDisconnectedRef.value = true; break; }
-      }
-    }
-
-    if (sseBuffer.trim() && !clientDisconnectedRef.value) {
-      sseBuffer = normalizeSSEEvent(sseBuffer, isKimi, fallbackKimiState);
-      debug(`[FALLBACK -> PROXY] ${sseBuffer}`);
-      const { eventStr: taggedStr } = injectModelTag(sseBuffer, nextEp.model, tagState);
-      const out = fallbackKimiState.kimiStreamId
-        ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/g, `"id":"${fallbackStreamId}"`)
+    for await (let eventStr of sseEvents(response, chunkTimer, clientDisconnectedRef)) {
+      eventStr = normalizeSSEEvent(eventStr, fallbackStreamState);
+      debug(`[FALLBACK -> PROXY] ${eventStr}`);
+      const { eventStr: taggedStr } = injectModelTag(eventStr, nextEp.model, tagState);
+      const out = fallbackStreamState.streamId
+        ? taggedStr.replace(/"id"\s*:\s*"[^"]*"/, `"id":"${fallbackStreamId}"`)
         : taggedStr;
-      await writeSSE(res, out + '\n\n');
+      const alive = await writeSSE(res, out + '\n\n');
+      if (!alive) { clientDisconnectedRef.value = true; break; }
     }
 
     return true;
@@ -398,7 +388,6 @@ export async function handleRequest(req, res) {
       // mid-stream — we do NOT retry the same endpoint: that would loop for
       // 2×stream_timeout on every hung connection and multiply the failure
       // latency. Instead we abort and move to the next endpoint in the cascade.
-      let gotResponseHeaders = false;
 
       for (let attempt = 1; attempt <= 2 && !requestComplete && !clientRef.value; attempt++) {
         await enforceTimeLimit();
@@ -411,20 +400,21 @@ export async function handleRequest(req, res) {
         // stream, NÃO mede "pensamento" pós-headers — só o handshake inicial
         // (TCP+TLS+processamento upstream até o primeiro byte de resposta).
         const initialTimer = setTimeout(() => {
-          console.warn(`${ts()} [TIMEOUT] ${ENV.connTimeoutMs}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
+          console.warn(`${ts()} [TIMEOUT] ${state.connectTimeout}ms excedido em ${visualTag(endpoint.provider, endpoint.model, kIdx)}. Abortando...`);
           controller.abort();
-        }, ENV.connTimeoutMs);
+        }, state.connectTimeout);
 
         // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks do
         // stream SSE. Reseta a cada chunk recebido via chunkTimer.reset().
         // NÃO mede duração total do stream — só aborta se ficar 90s sem
         // receber NENHUM byte. Stream lento mas contínuo NUNCA aborta.
-        const chunkTimer = makeChunkTimer(ENV.streamTimeoutMs, () => {
-          console.warn(`${ts()} [STREAM] ${ENV.streamTimeoutMs}ms sem dados! Abortando...`);
+        const chunkTimer = makeChunkTimer(state.streamTimeout, () => {
+          console.warn(`${ts()} [STREAM] ${state.streamTimeout}ms sem dados em ${visualTag(endpoint.provider, endpoint.model, kIdx)}! Abortando...`);
           controller.abort();
         });
 
         const attemptStart = Date.now();
+        let gotResponseHeaders = false;
         try {
           const url = `${provider.baseUrl}${req.url}`;
           const body = prepareBody(parsedOriginal, endpoint);
@@ -433,7 +423,7 @@ export async function handleRequest(req, res) {
 
           const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
           clearTimeout(initialTimer);
-          gotResponseHeaders = true; // we got *some* response — don't retry this endpoint on stream errors
+          gotResponseHeaders = true;
           console.log(
             `${ts()} [RESPOSTA] Status ${response.status} em ${((Date.now() - attemptStart) / 1000).toFixed(2)}s`,
           );
@@ -458,23 +448,11 @@ export async function handleRequest(req, res) {
 
             if (abortCascade) {
               if (!res.headersSent) {
-                const wantsStream = parsedOriginal?.stream !== false;
-                if (wantsStream) {
-                  const abortStreamId = 'chatcmpl-proxy-abort';
-                  res.writeHead(200, {
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                  });
-                  const abortMsg = `\n[Proxy: erro ${response.status} — requisição inválida, não retriable]`;
-                  await sendSyntheticChunk(res, abortStreamId, abortMsg);
-                  await writeSSE(res, 'data: ' + JSON.stringify({
-                    id: abortStreamId, object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000), model: 'proxy',
-                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                  }) + '\n\n');
-                  if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-                  res.end();
+                if (response.status === 400 && CONTEXT_OVERFLOW_RE.test(errBody)) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(errBody);
+                } else if (parsedOriginal?.stream !== false) {
+                  await emitErrorStream(res, 'chatcmpl-proxy-abort', `\n[Proxy: erro ${response.status} — requisição inválida, não retriable]`);
                 } else {
                   res.writeHead(response.status, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: { message: errBody, type: 'proxy_abort_error' } }));
@@ -487,39 +465,27 @@ export async function handleRequest(req, res) {
           }
 
           // ----- Success: stream the response -----
-          setLastUsedModel(endpoint.name);
+          setLastUsedModel(endpoint.name, kIdx);
           state.backoffIndex = 0;
           attemptsLog.push(`OK ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 
-          /** @type {Record<string, string>} */
-          const resHeaders = {};
-          response.headers.forEach((v, k) => {
-            if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
-          });
-          res.writeHead(response.status, resHeaders);
-
           const tagState = newTagState();
-          const kimiState = newKimiState();
-          const isKimi = endpoint.model.includes('kimi');
+          const streamState = newStreamState();
 
           try {
-            await pumpStream(response, res, endpoint, tagState, kimiState, controller, chunkTimer, clientRef);
+            await pumpStream(response, res, endpoint, tagState, streamState, chunkTimer, clientRef);
           } catch (streamErr) {
-            if (res.headersSent && !clientRef.value && !isKimi) {
-              console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message} — re-thrown para encerramento.`);
-              throw streamErr;
-            }
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
           } finally {
             chunkTimer.clear();
-            if (isKimi) {
-              const hasToolCalls = kimiState.kimiEmittedAnswer;
-              const c = kimiState.kimiContentBuf.trimEnd();
-              console.log(`${ts()} [KIMI-FIM] contentLen=${kimiState.kimiContentBuf.length} tail=${JSON.stringify(c.slice(-40))} toolCalls=${hasToolCalls} clientGone=${clientRef.value}`);
+            if (streamState.headersSent) {
+              const hasContent = streamState.contentBuf.trim().length > 0;
+              const hasReasoning = streamState.reasoningBuf.trim().length > 0;
+              console.log(`${ts()} [STREAM-FIM] contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length} toolCalls=${streamState.emittedAnswer} clientGone=${clientRef.value}`);
               if (!clientRef.value) {
-                if (!hasToolCalls && (c === '' || c.endsWith(':') || c.endsWith('...') || c.endsWith('\u2026') || c.endsWith(',') || c.endsWith('<') || c.endsWith('>') || c.endsWith('{') || c.endsWith('}') || c.endsWith('[') || c.endsWith(']') || c.endsWith('(') || c.endsWith(')'))) {
-                  kimiState.kimiNeedsFallback = true;
-                  console.log(`${ts()} [${endpoint.name}] Resposta incompleta. Acionando fallback.`);
+                if (hasReasoning && !hasContent) {
+                  streamState.needsFallback = true;
+                  console.log(`${ts()} [${endpoint.name}] Só reasoning sem content — acionando fallback.`);
                 } else {
                   console.log(`${ts()} [${endpoint.name}] Resposta considerada completa (sem fallback).`);
                 }
@@ -529,42 +495,36 @@ export async function handleRequest(req, res) {
             }
           }
 
-          // ----- Kimi silent-failure fallback -----
-          // Declared outside the if-block so the finalize block below can
-          // check whether a fallback actually succeeded (for metrics accuracy).
+          const hasAnyOutput = streamState.emittedAnswer || streamState.contentBuf.length > 0 || streamState.reasoningBuf.length > 0;
+          if (!streamState.headersSent && !hasAnyOutput && !clientRef.value) {
+            attemptsLog[attemptsLog.length - 1] = `VAZIO ${visualTag(endpoint.provider, endpoint.model, kIdx)}`;
+            console.log(`${ts()} [${endpoint.name}] Sem conteúdo útil (emittedAnswer=${streamState.emittedAnswer} contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length}) — pulando para próximo modelo.`);
+            recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
+            break;
+          }
+
           let fallbackOk = false;
-          if (kimiState.kimiNeedsFallback && !clientRef.value) {
-            const fallbackStreamId = kimiState.kimiStreamId || 'chatcmpl-fallback';
-            kimiState.kimiFinishChunkBuf = null;
+          if (streamState.needsFallback && !clientRef.value) {
+            const fallbackStreamId = streamState.streamId || 'chatcmpl-fallback';
+            streamState.finishChunkBuf = null;
 
             await sendSyntheticChunk(res, fallbackStreamId, '\n', 'proxy-fallback');
 
             const fallbackTagState = newTagState();
-            const fallbackKimiState = newKimiState();
-            fallbackKimiState.kimiStreamId = kimiState.kimiStreamId;
+            const fallbackStreamState = newStreamState();
+            fallbackStreamState.streamId = streamState.streamId;
 
-            // Build a FRESH body from the ORIGINAL parsedOriginal (not the
-            // Kimi-prepared one). If we used prepareBody(parsedOriginal, endpoint)
-            // here, the body would carry Kimi's model name, KIMI_EXTRA_RULES
-            // system prompt, and Kimi's modelConfigs options — which would then
-            // leak into the fallback model's request even after runFallback
-            // re-prepares it (because prepareBody only ADDS Kimi rules, never
-            // removes them). Using parsedOriginal directly lets runFallback's
-            // internal prepareBody(fbParsedOriginal, nextEp) correctly apply
-            // nextEp's own model, rules, and options.
             const fbParsedOriginal = { ...parsedOriginal, messages: undefined };
             if (Array.isArray(parsedOriginal.messages)) {
               fbParsedOriginal.messages = parsedOriginal.messages.map((m) => ({ ...m }));
             }
 
-            // Append Kimi's reasoning into the last user message so the fallback
-            // model has the context Kimi was thinking about.
-            if (kimiState.kimiReasoningBuf.trim() && Array.isArray(fbParsedOriginal.messages)) {
+            if (streamState.reasoningBuf.trim() && Array.isArray(fbParsedOriginal.messages)) {
               const lastUserIdx = fbParsedOriginal.messages.findLastIndex?.((m) => m.role === 'user') ?? -1;
               if (lastUserIdx >= 0) {
                 const suffix =
                   '\n\n---\nEu mandei essa mesma mensagem pra outra IA e ela me devolveu isso aqui mas não confie cegamente antes de testar:\n\n' +
-                  kimiState.kimiReasoningBuf.trim();
+                  streamState.reasoningBuf.trim();
                 const msg = fbParsedOriginal.messages[lastUserIdx];
                 if (Array.isArray(msg.content)) {
                   const textPart = msg.content.find((p) => p.type === 'text');
@@ -592,7 +552,7 @@ export async function handleRequest(req, res) {
                 nextEp,
                 fallbackStreamId,
                 fallbackTagState,
-                fallbackKimiState,
+                fallbackStreamState,
                 clientRef,
               );
               if (ok) {
@@ -607,43 +567,44 @@ export async function handleRequest(req, res) {
             if (!fallbackOk && !clientRef.value) {
               console.log(`${ts()} [FALLBACK] Todos os modelos falharam.`);
               await sendSyntheticChunk(res, fallbackStreamId, '[Todos os fallbacks falharam]', 'proxy');
-              // Emit a proper finish_reason chunk so the client doesn't wait
-              // forever for a stream terminator. Without this, some clients
-              // (including opencode) may hang expecting a finish_reason field.
-              if (!res.__poisoned) {
-                await writeSSE(
-                  res,
-                  'data: ' +
-                    JSON.stringify({
-                      id: fallbackStreamId,
-                      object: 'chat.completion.chunk',
-                      created: Math.floor(Date.now() / 1000),
-                      model: 'proxy',
-                      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                    }) +
-                    '\n\n',
-                );
-              }
+              await writeSSE(
+                res,
+                'data: ' +
+                  JSON.stringify({
+                    id: fallbackStreamId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: 'proxy',
+                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+                  }) +
+                  '\n\n',
+              );
             }
-          } else if (kimiState.kimiFinishChunkBuf) {
-            // No fallback needed — emit the finish chunk we held back, then the
-            // [DONE] marker (also held back) in the correct order.
-            await writeSSE(res, kimiState.kimiFinishChunkBuf + '\n\n');
-            if (kimiState.kimiDoneBuf) await writeSSE(res, kimiState.kimiDoneBuf + '\n\n');
-          } else if (kimiState.kimiDoneBuf) {
-            await writeSSE(res, kimiState.kimiDoneBuf + '\n\n');
+          } else if (streamState.finishChunkBuf) {
+            if (!streamState.headersSent) {
+              res.writeHead(response.status, resHeaders);
+              streamState.headersSent = true;
+              for (const pending of pendingChunks) {
+                const alive = await writeSSE(res, pending + '\n\n');
+                if (!alive) { clientRef.value = true; break; }
+              }
+              pendingChunks.length = 0;
+            }
+            await writeSSE(res, streamState.finishChunkBuf + '\n\n');
+            if (streamState.doneBuf) await writeSSE(res, streamState.doneBuf + '\n\n');
+          } else if (streamState.doneBuf) {
+            if (!streamState.headersSent) {
+              res.writeHead(response.status, resHeaders);
+              streamState.headersSent = true;
+            }
+            await writeSSE(res, streamState.doneBuf + '\n\n');
           }
 
-          // ----- Finalize -----
           if (!res.writableEnded) {
             if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
             res.end();
           }
-          // Record the primary endpoint. When a Kimi silent-fallback occurred,
-          // the primary did NOT actually answer the user — record it as an
-          // error so /metrics doesn't double-count a single user request as
-          // two successes (primary + fallback).
-          if (kimiState.kimiNeedsFallback && fallbackOk) {
+          if (streamState.needsFallback && fallbackOk) {
             recordRequest(endpoint.model, Date.now() - attemptStart, false, true);
           } else {
             recordRequest(endpoint.model, Date.now() - attemptStart, false, false);
@@ -657,6 +618,11 @@ export async function handleRequest(req, res) {
           if (isAbort) {
             if (!clientRef.value) {
               console.warn(`${ts()} [ABORT] Timeout em ${visualTag(endpoint.provider, endpoint.model, kIdx)}.`);
+              applyTimeoutCeilingBackoff(
+                state,
+                visualTag(endpoint.provider, endpoint.model, kIdx),
+                gotResponseHeaders,
+              );
             }
           } else {
             console.error(`${ts()} [REDE] ${visualTag(endpoint.provider, endpoint.model, kIdx)}: ${fetchErr.message}`);
@@ -672,20 +638,8 @@ export async function handleRequest(req, res) {
           // client hangs forever waiting for a response that never completes.
           if (res.headersSent && !res.writableEnded && !clientRef.value) {
             console.log(`${ts()} [STREAM-FALHOU] Encerrando stream do cliente após abort.`);
-            const errStreamId = 'chatcmpl-proxy-abort';
             try {
-              await writeSSE(res, 'data: ' + JSON.stringify({
-                id: errStreamId, object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000), model: 'proxy',
-                choices: [{ delta: { content: '\n\n[Stream interrompido por timeout]' }, index: 0, finish_reason: null }],
-              }) + '\n\n');
-              await writeSSE(res, 'data: ' + JSON.stringify({
-                id: errStreamId, object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000), model: 'proxy',
-                choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-              }) + '\n\n');
-              if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-              res.end();
+              await emitErrorStream(res, 'chatcmpl-proxy-abort', '\n\n[Stream interrompido por timeout]');
             } catch (e) {
               console.warn(`${ts()} [STREAM-FALHOU] Erro ao encerrar: ${e.message}`);
               try { res.destroy(); } catch { /* ignore */ }
@@ -715,68 +669,32 @@ export async function handleRequest(req, res) {
       console.log(`${ts()} [RESUMO] ${attemptsLog.join(' -> ')} | ${total}s`);
     }
 
-    // Every endpoint failed without aborting — emit a synthetic SSE stream
-    // so the client (opencode) sees a completed response instead of a hard
-    // 429/503 JSON error. A hard error makes opencode stop and require the
-    // user to type "." to retry; a synthetic stream lets the conversation
-    // continue seamlessly.
+    // Every endpoint failed without aborting — return HTTP 429 (with
+    // Retry-After) or 503 so OpenCode sees a retryable error and auto-retries
+    // with its own backoff, instead of masking as synthetic SSE 200 which
+    // forced the user to manually re-send.
     if (!requestComplete && !res.headersSent && !clientRef.value) {
       const unblock = earliestUnblockMs();
       const waitSec = Math.ceil((unblock - Date.now()) / 1000);
-      const wantsStream = parsedOriginal?.stream !== false;
 
-      if (wantsStream) {
-        const msg = waitSec > 0 && waitSec < 30 * 60
-          ? `\n[Proxy: todos os modelos indisponíveis — aguarde ${waitSec}s e reenvie]`
-          : '\n[Proxy: serviço indisponível — tente novamente]';
-        const errStreamId = 'chatcmpl-proxy-exhausted';
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-        });
-        await sendSyntheticChunk(res, errStreamId, msg);
-        await writeSSE(res, 'data: ' + JSON.stringify({
-          id: errStreamId, object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000), model: 'proxy',
-          choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-        }) + '\n\n');
-        if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-        res.end();
+      if (waitSec > 0 && waitSec < 30 * 60) {
+        res.writeHead(429, { 'Retry-After': String(waitSec), 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: { message: `Todos os endpoints bloqueados. Tente em ${waitSec}s.`, type: 'proxy_overload' },
+          }),
+        );
       } else {
-        if (waitSec > 0 && waitSec < 30 * 60) {
-          res.writeHead(429, { 'Retry-After': String(waitSec), 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              error: { message: `Todos os endpoints bloqueados. Tente em ${waitSec}s.`, type: 'proxy_overload' },
-            }),
-          );
-        } else {
-          res.writeHead(503, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: { message: 'Serviço indisponível.', type: 'proxy_unavailable' } }));
-        }
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Serviço indisponível.', type: 'proxy_unavailable' } }));
       }
     }
   } catch (err) {
     console.error(`${ts()} [CRÍTICO] Erro interno: ${err?.stack ?? err}`);
     if (!res.headersSent && !clientRef.value) {
-      const wantsStream = parsedOriginal?.stream !== false;
-      if (wantsStream) {
-        const errStreamId = 'chatcmpl-proxy-error';
+      if (parsedOriginal?.stream !== false) {
         try {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          });
-          await sendSyntheticChunk(res, errStreamId, '\n[Proxy: erro interno — tente novamente]');
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: errStreamId, object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000), model: 'proxy',
-            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-          }) + '\n\n');
-          if (!res.__doneSent) await writeSSE(res, 'data: [DONE]\n\n');
-          res.end();
+          await emitErrorStream(res, 'chatcmpl-proxy-error', '\n[Proxy: erro interno — tente novamente]');
         } catch {
           try { res.destroy(); } catch { /* ignore */ }
         }
@@ -801,27 +719,7 @@ export function createServer() {
       console.error(`${ts()} [UNCAUGHT] ${err?.stack ?? err}`);
       if (!res.headersSent) {
         try {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          });
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: 'chatcmpl-proxy-uncaught',
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: 'proxy',
-            choices: [{ delta: { content: '\n[Proxy: erro interno — tente novamente]' }, index: 0, finish_reason: null }],
-          }) + '\n\n');
-          await writeSSE(res, 'data: ' + JSON.stringify({
-            id: 'chatcmpl-proxy-uncaught',
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: 'proxy',
-            choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-          }) + '\n\n');
-          await writeSSE(res, 'data: [DONE]\n\n');
-          res.end();
+          await emitErrorStream(res, 'chatcmpl-proxy-uncaught', '\n[Proxy: erro interno — tente novamente]');
         } catch {
           try { res.destroy(); } catch { /* ignore */ }
         }

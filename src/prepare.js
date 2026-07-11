@@ -1,6 +1,6 @@
 // src/prepare.js
 // Build the upstream request: deep-cloned body with model swap, tag cleanup,
-// Kimi-specific system prompt, and merged opencode.jsonc model options.
+// and merged opencode.jsonc model options.
 
 import { modelConfigs } from './config.js';
 import { HOP_BY_HOP, TAG_RE, SAFE_MODEL_OPTION_KEYS } from './constants.js';
@@ -9,17 +9,6 @@ import { HOP_BY_HOP, TAG_RE, SAFE_MODEL_OPTION_KEYS } from './constants.js';
 function cleanTags(s) {
   return typeof s === 'string' ? s.replace(TAG_RE, '') : s;
 }
-
-/** Extra system prompt appended when targeting Kimi (forces real content output). */
-export const KIMI_EXTRA_RULES = [
-  '',
-  '',
-  'CRITICAL OUTPUT FORMAT RULES — YOU MUST FOLLOW THESE:',
-  '1. SEPARATE THINKING FROM ANSWER: "reasoning_content" = thinking, "content" = final answer.',
-  '2. EVERY response MUST have a "content" field with a real answer.',
-  '3. If using tools, emit "tool_calls" AND put a brief summary in "content".',
-  '4. NEVER finish a response with only "reasoning_content" and empty "content".',
-].join('\n');
 
 /**
  * Build the final upstream JSON body for a given endpoint.
@@ -53,16 +42,6 @@ export function prepareBody(parsedOriginal, endpoint) {
       }
       if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length === 0) {
         delete msg.tool_calls;
-      }
-    }
-
-    // Kimi-specific: force it to actually answer instead of just thinking.
-    if (endpoint.model.includes('kimi')) {
-      const sysIdx = body.messages.findIndex((m) => m.role === 'system');
-      if (sysIdx >= 0) {
-        body.messages[sysIdx].content += KIMI_EXTRA_RULES;
-      } else {
-        body.messages.unshift({ role: 'system', content: KIMI_EXTRA_RULES.trim() });
       }
     }
   }
@@ -117,7 +96,5 @@ export function buildFetchOptions(method, headers, body, signal) {
     headers,
     body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
     signal,
-    // Node fetch handles gzip/br automatically.
-    compress: true,
   };
 }

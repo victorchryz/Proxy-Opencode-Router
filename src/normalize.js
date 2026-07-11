@@ -20,21 +20,22 @@ const STRIP_CJK = process.env.PROXY_STRIP_CJK === '1';
 
 /** @typedef {{ reasoningTaggedModel: string|null, contentTaggedModel: string|null }} TagState */
 
-/** @typedef {{ kimiEmittedAnswer: boolean, kimiReasoningBuf: string, kimiContentBuf: string, kimiStreamId: string|null, kimiFinishChunkBuf: string|null, kimiDoneBuf: string|null, kimiNeedsFallback: boolean }} KimiState */
+/** @typedef {{ emittedAnswer: boolean, reasoningBuf: string, contentBuf: string, streamId: string|null, finishChunkBuf: string|null, doneBuf: string|null, needsFallback: boolean, headersSent: boolean }} StreamState */
 
 export function newTagState() {
   return { reasoningTaggedModel: null, contentTaggedModel: null };
 }
 
-export function newKimiState() {
+export function newStreamState() {
   return {
-    kimiEmittedAnswer: false,
-    kimiReasoningBuf: '',
-    kimiContentBuf: '',
-    kimiStreamId: null,
-    kimiFinishChunkBuf: null,
-    kimiDoneBuf: null,
-    kimiNeedsFallback: false,
+    emittedAnswer: false,
+    reasoningBuf: '',
+    contentBuf: '',
+    streamId: null,
+    finishChunkBuf: null,
+    doneBuf: null,
+    needsFallback: false,
+    headersSent: false,
   };
 }
 
@@ -101,24 +102,20 @@ export function injectModelTag(eventStr, model, tagState) {
 /**
  * Normalize one SSE event (a single `data: {...}` frame, no trailing blank line).
  * @param {string} eventStr
- * @param {boolean} isKimi
- * @param {KimiState|null} kimiState
+ * @param {StreamState|null} streamState
  * @returns {string}
  */
-export function normalizeSSEEvent(eventStr, isKimi, kimiState) {
+export function normalizeSSEEvent(eventStr, streamState) {
   if (!eventStr.startsWith('data: ') || eventStr.trim() === 'data: [DONE]') {
     return eventStr;
   }
 
-  // Fast path: skip JSON parsing when there's nothing we'd touch.
-  // We check for 'reasoning' too because some models emit a stray `reasoning`
-  // field (in addition to `reasoning_content`) that we need to strip.
   const needsWork =
-    isKimi ||
     eventStr.includes('"tool_calls"') ||
     eventStr.includes('"content"') ||
     eventStr.includes('"reasoning"') ||
-    CJK_TEST.test(eventStr);
+    eventStr.includes('"reasoning_content"') ||
+    (STRIP_CJK && CJK_TEST.test(eventStr));
   if (!needsWork) return eventStr;
 
   let parsed;
@@ -173,12 +170,15 @@ export function normalizeSSEEvent(eventStr, isKimi, kimiState) {
     if (STRIP_CJK && delta.content) delta.content = delta.content.replace(CJK_RE, '');
     if (STRIP_CJK && delta.reasoning_content) delta.reasoning_content = delta.reasoning_content.replace(CJK_RE, '');
 
-    if (kimiState) {
-      if (delta.content) kimiState.kimiContentBuf += delta.content;
-      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
-        kimiState.kimiEmittedAnswer = true;
+    if (streamState) {
+      if (delta.content) {
+        streamState.contentBuf += delta.content;
+        streamState.emittedAnswer = true;
       }
-      if (delta.reasoning_content) kimiState.kimiReasoningBuf += delta.reasoning_content;
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+        streamState.emittedAnswer = true;
+      }
+      if (delta.reasoning_content) streamState.reasoningBuf += delta.reasoning_content;
     }
   }
 

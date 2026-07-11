@@ -3,10 +3,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEBUG_LOG_PATH = path.join(__dirname, '..', 'debug.log');
+const DEBUG_LOG_PATH = path.join(import.meta.dirname, '..', 'debug.log');
 
 let DEBUG_MODE = false;
 let debugFh = null;
@@ -14,14 +12,10 @@ let debugFh = null;
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
 
-/** Provider short labels for visual tags. */
-const PROVIDER_LABEL = { nvidia: 'NVDA' };
-
 /** Color per model slug (keeps the same palette as v1 for consistency). */
 function colorForModel(model) {
   if (model.includes('glm-5.2')) return (s) => `\x1b[36m${s}${RESET}`; // cyan
   if (model.includes('deepseek-v4-pro')) return (s) => `\x1b[34m${s}${RESET}`; // blue
-  if (model.includes('kimi-k2.6')) return (s) => `\x1b[35m${s}${RESET}`; // magenta
   if (model.includes('minimax-m3')) return (s) => `\x1b[31m${s}${RESET}`; // red
   return (s) => s;
 }
@@ -29,7 +23,7 @@ function colorForModel(model) {
 /** Build the colored tag shown on every log line, e.g. `kimi-k2.6 [NVDA K1]`. */
 export function visualTag(provider, model, keyIdx) {
   const slug = model.includes('/') ? model.split('/').pop() : model;
-  const ptag = PROVIDER_LABEL[provider] || provider.toUpperCase();
+  const ptag = provider.toUpperCase();
   return `${colorForModel(model)(slug)} [${ptag} K${keyIdx + 1}]`;
 }
 
