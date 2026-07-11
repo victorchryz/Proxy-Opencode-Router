@@ -478,20 +478,23 @@ export async function handleRequest(req, res) {
           } catch (streamErr) {
             streamAborted = true;
             console.warn(`${ts()} [STREAM] Cortado: ${streamErr.message}`);
+            if (streamErr?.name === 'AbortError' && !clientRef.value) {
+              applyTimeoutCeilingBackoff(state, visualTag(endpoint.provider, endpoint.model, kIdx), true);
+            }
           } finally {
             chunkTimer.clear();
             if (streamState.headersSent) {
               const hasContent = streamState.contentBuf.trim().length > 0;
               const hasReasoning = streamState.reasoningBuf.trim().length > 0;
-              const hasNothing = !hasContent && !hasReasoning;
-              console.log(`${ts()} [STREAM-FIM] contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length} toolCalls=${streamState.emittedAnswer} clientGone=${clientRef.value}`);
+              const hasFinish = !!streamState.finishChunkBuf;
+              console.log(`${ts()} [STREAM-FIM] contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length} toolCalls=${streamState.emittedAnswer} finish=${hasFinish} clientGone=${clientRef.value}`);
               if (!clientRef.value) {
                 if (hasReasoning && !hasContent) {
                   streamState.needsFallback = true;
                   console.log(`${ts()} [${endpoint.name}] Só reasoning sem content — acionando fallback.`);
-                } else if (streamAborted && hasNothing) {
+                } else if (streamAborted && !hasFinish) {
                   streamState.needsFallback = true;
-                  console.log(`${ts()} [${endpoint.name}] Stream abortado sem conteúdo útil — acionando fallback.`);
+                  console.log(`${ts()} [${endpoint.name}] Stream abortado sem finish_reason (contentLen=${streamState.contentBuf.length}) — acionando fallback.`);
                 } else {
                   console.log(`${ts()} [${endpoint.name}] Resposta considerada completa (sem fallback).`);
                 }
