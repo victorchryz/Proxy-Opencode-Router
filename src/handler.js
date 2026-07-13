@@ -404,17 +404,9 @@ export async function handleRequest(req, res) {
           controller.abort();
         }, state.connectTimeout);
 
-        // streamTimeoutMs: tempo máximo de SILÊNCIO (idle) entre chunks do
-        // stream SSE. Reseta a cada chunk recebido via chunkTimer.reset().
-        // NÃO mede duração total do stream — só aborta se ficar 90s sem
-        // receber NENHUM byte. Stream lento mas contínuo NUNCA aborta.
-        const chunkTimer = makeChunkTimer(state.streamTimeout, () => {
-          console.warn(`${ts()} [STREAM] ${state.streamTimeout}ms sem dados em ${visualTag(endpoint.provider, endpoint.model, kIdx)}! Abortando...`);
-          controller.abort();
-        });
-
         const attemptStart = Date.now();
         let gotResponseHeaders = false;
+        let chunkTimer;
         try {
           const url = `${provider.baseUrl}${req.url}`;
           const body = prepareBody(parsedOriginal, endpoint);
@@ -424,6 +416,10 @@ export async function handleRequest(req, res) {
           const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
           clearTimeout(initialTimer);
           gotResponseHeaders = true;
+          chunkTimer = makeChunkTimer(state.streamTimeout, () => {
+            console.warn(`${ts()} [STREAM] ${state.streamTimeout}ms sem dados em ${visualTag(endpoint.provider, endpoint.model, kIdx)}! Abortando...`);
+            controller.abort();
+          });
           console.log(
             `${ts()} [RESPOSTA] Status ${response.status} em ${((Date.now() - attemptStart) / 1000).toFixed(2)}s`,
           );
@@ -622,7 +618,7 @@ export async function handleRequest(req, res) {
           break; // exit attempt loop
         } catch (fetchErr) {
           clearTimeout(initialTimer);
-          chunkTimer.clear();
+          chunkTimer?.clear();
           const isAbort = fetchErr?.name === 'AbortError';
           if (isAbort) {
             if (!clientRef.value) {
