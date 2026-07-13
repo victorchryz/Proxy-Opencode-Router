@@ -489,9 +489,9 @@ export async function handleRequest(req, res) {
               const hasFinish = !!streamState.finishChunkBuf;
               console.log(`${ts()} [STREAM-FIM] contentLen=${streamState.contentBuf.length} reasoningLen=${streamState.reasoningBuf.length} toolCalls=${streamState.emittedAnswer} finish=${hasFinish} clientGone=${clientRef.value}`);
               if (!clientRef.value) {
-                if (hasReasoning && !hasContent) {
+                if (hasReasoning && !hasContent && !streamState.emittedAnswer) {
                   streamState.needsFallback = true;
-                  console.log(`${ts()} [${endpoint.name}] Só reasoning sem content — acionando fallback.`);
+                  console.log(`${ts()} [${endpoint.name}] Só reasoning sem content nem tool_calls — acionando fallback.`);
                 } else if (streamAborted && !hasFinish) {
                   streamState.needsFallback = true;
                   console.log(`${ts()} [${endpoint.name}] Stream abortado sem finish_reason (contentLen=${streamState.contentBuf.length}) — acionando fallback.`);
