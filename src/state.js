@@ -9,7 +9,7 @@ import { ts } from './logger.js';
 
 /** Backoff schedule (minutes) for retryable upstream errors.
  *  Starts at 2 min and grows to 1h. */
-const BACKOFF_MINUTES = [2, 3, 5, 10, 15, 20, 30, 60];
+const BACKOFF_MINUTES = [2, 5, 10, 15, 20, 30, 60];
 
 /** @type {Record<string, EndpointState>} */
 const endpointState = {};
@@ -111,13 +111,13 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   return false;
 }
 
-const CONNECT_CEILING = 45000;
-const STREAM_CEILING = 60000;
+const CONNECT_CEILING = 60000;
+const STREAM_CEILING = 120000;
 
 export function applyTimeoutCeilingBackoff(state, tag, gotResponseHeaders) {
   const ceiling = gotResponseHeaders ? STREAM_CEILING : CONNECT_CEILING;
   const current = gotResponseHeaders ? state.streamTimeout : state.connectTimeout;
-  const expanded = Math.min(ceiling, Math.round(current * 1.5));
+  const expanded = Math.min(ceiling, Math.round(current * 1.3));
 
   if (expanded === current) {
     const waitMin = BACKOFF_MINUTES[state.backoffIndex] ?? 60;
