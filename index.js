@@ -21,14 +21,14 @@ installDebugToggler();
 const server = createServer();
 
 server.listen(ENV.port, ENV.host, () => {
-  console.log(`\n\x1b[36m🚀 nvidia-opencode-proxy v3.6.2 ativo!\x1b[0m`);
+  console.log(`\n\x1b[36m🚀 nvidia-opencode-proxy v3.6.3 ativo!\x1b[0m`);
   console.log(`🛡  Host:Port      : ${ENV.host}:${ENV.port}`);
   console.log(`🛡  RPM alvo       : ${ENV.targetRpm} (intervalo ${MIN_INTERVAL_MS}ms)`);
   console.log(`🛡  Concorrência   : ${ENV.maxConcurrent}`);
   console.log(`🛡  Timers         : ${ENV.connTimeoutMs}ms conexão | ${ENV.streamTimeoutMs}ms stream idle`);
   console.log(`🔌 Chaves físicas : ${PROVIDERS.nvidia.keys.length}`);
   console.log(`📊 Endpoints      : GET /health · GET /metrics`);
-  console.log(`🔄 Cascata        : alterna K1/K2 a cada request, sem repetir modelo`);
+  console.log(`🔄 Cascata        : ${ENV.antiRepeat ? 'sticky per-key (K1≠K2)' : 'legado (ambas no mesmo modelo)'}`);
   console.log(`🐛 Debug          : pressione [D] no terminal para ligar/desligar\n`);
 });
 

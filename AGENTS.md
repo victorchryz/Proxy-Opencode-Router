@@ -77,12 +77,17 @@ Proxy-Opencode-Router/
 | `PROXY_HOST` | 127.0.0.1 | Host do proxy |
 | `PROXY_STRIP_CJK` | 0 | Remove caracteres CJK do stream (1 = ligado) |
 | `PROXY_TEST_MODE` | 0 | Usa mock keys em vez de chaves reais (1 = ligado) |
+| `PROXY_ANTI_REPEAT` | 1 | Anti-repetição sticky per-key (1=K1≠K2, 0=ambas no mesmo modelo) |
 
 ## Comportamentos críticos
 
 ### Cascata com prioridade fixa
 
 Ordem fixa de preferência: `glm-5.2 → kimi-k2.6 → minimax-m3 → deepseek-v4-pro → inkling`
+
+> Modo controlado por `PROXY_ANTI_REPEAT` (default `1`). Com `0`, volta ao
+> modo legado: ambas as keys batem no mesmo modelo (topo da prioridade) em
+> lockstep, sem sticky per-key.
 
 - **Alternância K1↔K2:** `globalKeyToggle` alterna a chave a cada request
 - **Sticky model per-key:** cada key lembra o último modelo usado com sucesso

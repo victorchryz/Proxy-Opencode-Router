@@ -33,6 +33,7 @@ export const ENV = {
   maxConcurrent: parseIntSafe(process.env.PROXY_MAX_CONCURRENT, 1),
   port: parseIntSafe(process.env.PROXY_PORT, 9999),
   host: process.env.PROXY_HOST || '127.0.0.1',
+  antiRepeat: process.env.PROXY_ANTI_REPEAT !== '0',
 };
 
 /** Minimum interval (ms) between two upstream requests to honor RPM. */

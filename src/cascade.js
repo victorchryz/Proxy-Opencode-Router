@@ -1,9 +1,10 @@
 // src/cascade.js
 // Dynamic cascade builder: alternates NVIDIA keys and uses a fixed model
-// priority (GLM → KIMI → MM → DS → INKLING) with per-key "sticky" model
-// selection.
+// priority (GLM → KIMI → MM → DS → INKLING). Two modes via PROXY_ANTI_REPEAT:
+//   - 1 (default): sticky per-key anti-repetition (K1≠K2 models).
+//   - 0: legacy — both keys hit the top available model in lockstep.
 //
-// Anti-repetition rules (two distinct triggers, not one blanket rule):
+// Anti-repetition rules (when PROXY_ANTI_REPEAT=1, two distinct triggers):
 //   1. BLOCKED trigger: if a key's current sticky model just got blocked,
 //      it falls through to the next available model in priority order,
 //      WITHOUT caring what the other key is currently using.
@@ -14,6 +15,7 @@
 //      it keeps repeating.
 
 import { getState } from './state.js';
+import { ENV } from './config.js';
 
 export const MODEL_MAP = {
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
@@ -29,7 +31,7 @@ let _globalKeyToggle = 1;
 const _stickyModel = new Map();
 
 export function setLastUsedModel(v, keyIdx) {
-  _stickyModel.set(keyIdx, v);
+  if (ENV.antiRepeat) _stickyModel.set(keyIdx, v);
 }
 
 function getModelDef(name) {
@@ -63,16 +65,27 @@ function collect(keyIdx, otherKeyIdx, now) {
   return [chosen, ...rest].map((m) => ({ ...m, physicalKey: keyIdx }));
 }
 
+function collectSimple(keyIdx, now) {
+  return DEFAULT_ORDER
+    .map(getModelDef)
+    .filter(Boolean)
+    .filter((m) => now >= getState(`${m.provider}:${m.model}__${keyIdx}`).blockedUntil)
+    .map((m) => ({ ...m, physicalKey: keyIdx }));
+}
+
 export function buildDynamicCascade(provider) {
   _globalKeyToggle = (_globalKeyToggle + 1) % provider.keys.length;
   const startKey = _globalKeyToggle;
   const otherKey = (startKey + 1) % provider.keys.length;
   const now = Date.now();
 
-  let cascade = collect(startKey, otherKey, now);
-
-  if (cascade.length === 0 && provider.keys.length > 1) {
-    cascade = collect(otherKey, startKey, now);
+  let cascade;
+  if (ENV.antiRepeat) {
+    cascade = collect(startKey, otherKey, now);
+    if (cascade.length === 0 && provider.keys.length > 1) cascade = collect(otherKey, startKey, now);
+  } else {
+    cascade = collectSimple(startKey, now);
+    if (cascade.length === 0 && provider.keys.length > 1) cascade = collectSimple(otherKey, now);
   }
 
   if (cascade.length === 0) {
