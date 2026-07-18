@@ -1,16 +1,20 @@
 // src/cascade.js
 // Dynamic cascade builder: alternates NVIDIA keys and uses a fixed model
-// priority (GLM → KIMI → MM → DS → INKLING) with anti-repetition per-key
-// (lastUsedModel+Key).
+// priority (GLM → KIMI → MM → DS → INKLING) with per-key "sticky" model
+// selection.
+//
+// Anti-repetition rules (two distinct triggers, not one blanket rule):
+//   1. BLOCKED trigger: if a key's current sticky model just got blocked,
+//      it falls through to the next available model in priority order,
+//      WITHOUT caring what the other key is currently using.
+//   2. COLLISION trigger: if a key's current sticky model is still free,
+//      but now equals what the OTHER key is currently using, this key
+//      switches to the highest-priority model available to it that isn't
+//      the other key's model — unless nothing else is free, in which case
+//      it keeps repeating.
 
 import { getState } from './state.js';
 
-/** @typedef {{ provider: string, model: string, name: string, physicalKey: number }} CascadeEndpoint */
-
-/**
- * Short slug  ->  { provider, model }.
- * Fixed priority order: GLM > KIMI > MM > DS > INKLING.
- */
 export const MODEL_MAP = {
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
   'kimi-k2.6': { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
@@ -21,54 +25,54 @@ export const MODEL_MAP = {
 
 const DEFAULT_ORDER = Object.keys(MODEL_MAP);
 
-// Alternates the starting physical key (0 / 1) per request.
 let _globalKeyToggle = 1;
+const _stickyModel = new Map();
 
-let _lastUsedModel = null;
-let _lastUsedKey = null;
-export function setLastUsedModel(v, keyIdx) { _lastUsedModel = v; _lastUsedKey = keyIdx; }
+export function setLastUsedModel(v, keyIdx) {
+  _stickyModel.set(keyIdx, v);
+}
 
-/** Look up a model definition by short slug. */
 function getModelDef(name) {
   const base = MODEL_MAP[name];
   return base ? { ...base, name } : null;
 }
 
-/**
- * Build the cascade for the next request.
- *
- * - Alternates K1↔K2 via globalKeyToggle.
- * - Walks DEFAULT_ORDER (GLM → KIMI → MM → DS → INKLING) skipping:
- *     1. lastUsedModel on the SAME key (anti-repetition per-key)
- *     2. models blocked on the start key
- * - If nothing available on start key, tries the other key (same priority).
- * - If nothing available on either key, absolute fallback: GLM on start key
- *   ignoring blocks.
- *
- * @param {{ keys: string[] }} provider
- * @returns {CascadeEndpoint[]}
- */
+function collect(keyIdx, otherKeyIdx, now) {
+  const avail = DEFAULT_ORDER
+    .map(getModelDef)
+    .filter(Boolean)
+    .filter((m) => now >= getState(`${m.provider}:${m.model}__${keyIdx}`).blockedUntil);
+
+  if (avail.length === 0) return [];
+
+  const curModel = _stickyModel.get(keyIdx) ?? null;
+  const otherModel = _stickyModel.get(otherKeyIdx) ?? null;
+
+  const wasBlocked = curModel !== null && !avail.some((m) => m.name === curModel);
+
+  let chosenName;
+  if (wasBlocked) {
+    chosenName = avail[0].name;
+  } else {
+    const alt = avail.find((m) => m.name !== otherModel);
+    chosenName = alt ? alt.name : avail[0].name;
+  }
+
+  const chosen = avail.find((m) => m.name === chosenName);
+  const rest = avail.filter((m) => m.name !== chosenName);
+  return [chosen, ...rest].map((m) => ({ ...m, physicalKey: keyIdx }));
+}
+
 export function buildDynamicCascade(provider) {
   _globalKeyToggle = (_globalKeyToggle + 1) % provider.keys.length;
   const startKey = _globalKeyToggle;
   const otherKey = (startKey + 1) % provider.keys.length;
   const now = Date.now();
 
-  const collect = (keyIdx) =>
-    DEFAULT_ORDER
-      .map(getModelDef)
-      .filter(Boolean)
-      .filter((m) => !(m.name === _lastUsedModel && keyIdx === _lastUsedKey))
-      .filter((m) => {
-        const s = getState(`${m.provider}:${m.model}__${keyIdx}`);
-        return now >= s.blockedUntil;
-      })
-      .map((m) => ({ ...m, physicalKey: keyIdx }));
-
-  let cascade = collect(startKey);
+  let cascade = collect(startKey, otherKey, now);
 
   if (cascade.length === 0 && provider.keys.length > 1) {
-    cascade = collect(otherKey);
+    cascade = collect(otherKey, startKey, now);
   }
 
   if (cascade.length === 0) {

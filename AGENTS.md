@@ -85,13 +85,23 @@ Proxy-Opencode-Router/
 Ordem fixa de preferência: `glm-5.2 → kimi-k2.6 → minimax-m3 → deepseek-v4-pro → inkling`
 
 - **Alternância K1↔K2:** `globalKeyToggle` alterna a chave a cada request
-- **lastUsedModel:** anti-repetição — se o modelo usado na última requisição
-  bem-sucedida é o primeiro da lista, ele é pulado e o próximo é usado
-- **Bloqueio é per-key:** modelo bloqueado em K1 não afeta K2. Se um modelo
-  está bloqueado na key atual, o próximo modelo da lista é tentado
+- **Sticky model per-key:** cada key lembra o último modelo usado com sucesso
+  nela (`_stickyModel` Map, keyIdx → slug). As duas keys podem estar em
+  modelos diferentes ao mesmo tempo (ex: K1=GLM, K2=KIMI), dobrando o
+  throughput efetivo antes de 429
+- **Anti-repetição (2 gatilhos, recomputados a cada request):**
+  1. **BLOCKED:** se o modelo sticky da key acabou de ser bloqueado, ela
+     cai para o próximo da ordem de prioridade, **ignorando** o que a
+     outra key está usando (bloqueio é per key+model, não global)
+  2. **COLLISION (senão):** a key mira no modelo de maior prioridade
+     disponível que **não** seja o modelo sticky da outra key —
+     **recomputado a cada request**, então uma key que caiu pra DS volta a
+     subir pra GLM/KIMI assim que liberarem, em vez de ficar presa.
+     Repetição entre keys só quando não há alternativa nesta key
+- **Bloqueio é per-key:** modelo bloqueado em K1 não afeta K2
 - **Fallback de key:** se todos os modelos estão bloqueados na key atual,
   tenta a outra key com a mesma ordem de prioridade
-- **Absolute fallback:** se todos os 8 pares (modelo×key) estão bloqueados,
+- **Absolute fallback:** se todos os 10 pares (modelo×key) estão bloqueados,
   ignora bloqueios e tenta GLM na key atual
 
 ### Backoff
