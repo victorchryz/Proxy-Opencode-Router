@@ -27,9 +27,9 @@ const parseIntSafe = (v, def) => {
  *    ser maior. (Default: 40)
  */
 export const ENV = {
-  targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 40),
-  connTimeoutMs: parseIntSafe(process.env.PROXY_CONN_TIMEOUT_MS, 15000),
-  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 30000),
+  targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 12),
+  connTimeoutMs: parseIntSafe(process.env.PROXY_CONN_TIMEOUT_MS, 60000),
+  streamTimeoutMs: parseIntSafe(process.env.PROXY_STREAM_TIMEOUT_MS, 60000),
   maxConcurrent: parseIntSafe(process.env.PROXY_MAX_CONCURRENT, 1),
   port: parseIntSafe(process.env.PROXY_PORT, 9999),
   host: process.env.PROXY_HOST || '127.0.0.1',

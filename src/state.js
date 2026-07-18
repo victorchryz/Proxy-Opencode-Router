@@ -111,8 +111,8 @@ export function applyBackoff(state, status, errBody, tag, headers) {
   return false;
 }
 
-const CONNECT_CEILING = 60000;
-const STREAM_CEILING = 120000;
+const CONNECT_CEILING = 150000;
+const STREAM_CEILING = 150000;
 
 export function applyTimeoutCeilingBackoff(state, tag, gotResponseHeaders) {
   const ceiling = gotResponseHeaders ? STREAM_CEILING : CONNECT_CEILING;

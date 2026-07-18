@@ -69,9 +69,9 @@ Proxy-Opencode-Router/
 | `NVIDIA_KEY_1` | — | Chave de API NVIDIA (obrigatória) |
 | `NVIDIA_KEY_2` | — | Chave de API NVIDIA (opcional) |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com` | Base URL da API NVIDIA |
-| `PROXY_TARGET_RPM` | 40 | Rate limit global (requests/min) |
+| `PROXY_TARGET_RPM` | 12 | Rate limit global (requests/min) |
 | `PROXY_CONN_TIMEOUT_MS` | 60000 | Timeout de conexão inicial (ms) |
-| `PROXY_STREAM_TIMEOUT_MS` | 90000 | Timeout de silêncio no stream (ms) |
+| `PROXY_STREAM_TIMEOUT_MS` | 60000 | Timeout de silêncio no stream (ms) |
 | `PROXY_MAX_CONCURRENT` | 1 | Requisições simultâneas |
 | `PROXY_PORT` | 9999 | Porta do proxy |
 | `PROXY_HOST` | 127.0.0.1 | Host do proxy |
