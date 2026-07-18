@@ -4,7 +4,7 @@ Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) p
 
 ## Funcionalidades
 
-- **Cascata com prioridade fixa:** `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
+- **Cascata com prioridade fixa:** `glm-5.2 → kimi-k2.6 → minimax-m3 → deepseek-v4-pro → inkling`
 - **Anti-repetição cross-key:** o último modelo usado é pulado na próxima requisição (K1↔K2)
 - **Fallback de key:** se todos os modelos estão bloqueados na key atual, tenta a outra
 - **Fallback Kimi automático:** se Kimi retorna só raciocínio (sem resposta), tenta todos os modelos não-Kimi em cascata
@@ -21,9 +21,10 @@ Proxy HTTP modular que roteia requisições do [OpenCode](https://opencode.ai) p
 | Prioridade | Modelo |
 |---|---|
 | 1º | **GLM-5.2** (Thinking) |
-| 2º | **DeepSeek V4 Pro** (Thinking) |
-| 3º | **Kimi K2.6** |
-| 4º | **MiniMax M3** (Thinking) |
+| 2º | **Kimi K2.6** (Thinking) |
+| 3º | **MiniMax M3** (Thinking adaptivo) |
+| 4º | **DeepSeek V4 Pro** (Thinking) |
+| 5º | **Inkling** |
 
 > A ordem é fixa. A cada requisição, o último modelo usado é pulado (anti-repetição).
 

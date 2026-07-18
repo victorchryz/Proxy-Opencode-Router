@@ -21,7 +21,7 @@ installDebugToggler();
 const server = createServer();
 
 server.listen(ENV.port, ENV.host, () => {
-  console.log(`\n\x1b[36m🚀 nvidia-opencode-proxy v3.4.7 ativo!\x1b[0m`);
+  console.log(`\n\x1b[36m🚀 nvidia-opencode-proxy v3.5.0 ativo!\x1b[0m`);
   console.log(`🛡  Host:Port      : ${ENV.host}:${ENV.port}`);
   console.log(`🛡  RPM alvo       : ${ENV.targetRpm} (intervalo ${MIN_INTERVAL_MS}ms)`);
   console.log(`🛡  Concorrência   : ${ENV.maxConcurrent}`);

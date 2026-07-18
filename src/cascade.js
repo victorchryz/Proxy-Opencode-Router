@@ -1,6 +1,7 @@
 // src/cascade.js
 // Dynamic cascade builder: alternates NVIDIA keys and uses a fixed model
-// priority (GLM → DS → MM) with anti-repetition per-key (lastUsedModel+Key).
+// priority (GLM → KIMI → MM → DS → INKLING) with anti-repetition per-key
+// (lastUsedModel+Key).
 
 import { getState } from './state.js';
 
@@ -8,12 +9,14 @@ import { getState } from './state.js';
 
 /**
  * Short slug  ->  { provider, model }.
- * Fixed priority order: GLM > DS > MM.
+ * Fixed priority order: GLM > KIMI > MM > DS > INKLING.
  */
 export const MODEL_MAP = {
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
+  'kimi-k2.6': { provider: 'nvidia', model: 'moonshotai/kimi-k2.6' },
   'minimax-m3': { provider: 'nvidia', model: 'minimaxai/minimax-m3' },
   'deepseek-v4-pro': { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-pro' },
+  'inkling': { provider: 'nvidia', model: 'thinkingmachines/inkling' },
 };
 
 const DEFAULT_ORDER = Object.keys(MODEL_MAP);
@@ -35,7 +38,7 @@ function getModelDef(name) {
  * Build the cascade for the next request.
  *
  * - Alternates K1↔K2 via globalKeyToggle.
- * - Walks DEFAULT_ORDER (GLM → DS → MM) skipping:
+ * - Walks DEFAULT_ORDER (GLM → KIMI → MM → DS → INKLING) skipping:
  *     1. lastUsedModel on the SAME key (anti-repetition per-key)
  *     2. models blocked on the start key
  * - If nothing available on start key, tries the other key (same priority).

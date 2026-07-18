@@ -24,15 +24,14 @@
             "stream_options": {"include_usage": true}
           }
         },
-        "deepseek-ai/deepseek-v4-pro": {
-          "name": "DeepSeek V4 Pro (Nvidia)",
-          "limit": {"context": 256000, "output": 16384},
+        "moonshotai/kimi-k2.6": {
+          "name": "Kimi K2.6 (Nvidia)",
+          "limit": {"context": 200000, "output": 65536},
           "options": {
             "stream": true,
             "temperature": 0.7,
             "top_p": 0.95,
-            "max_tokens": 16384,
-            "reasoning_effort": "max",
+            "max_tokens": 65536,
             "chat_template_kwargs": {"thinking": true},
             "stream_options": {"include_usage": true}
           }
@@ -45,12 +44,37 @@
             "temperature": 0.7,
             "top_p": 0.95,
             "max_tokens": 16384,
-            "chat_template_kwargs": {"thinking_mode": "enabled"},
+            "chat_template_kwargs": {"thinking_mode": "adaptive"},
+            "stream_options": {"include_usage": true}
+          }
+        },
+        "deepseek-ai/deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro (Nvidia)",
+          "limit": {"context": 200000, "output": 16384},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "max_tokens": 16384,
+            "reasoning_effort": "max",
+            "chat_template_kwargs": {"thinking": true},
+            "stream_options": {"include_usage": true}
+          }
+        },
+        "thinkingmachines/inkling": {
+          "name": "Inkling (Nvidia)",
+          "limit": {"context": 200000, "output": 16384},
+          "options": {
+            "stream": true,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "max_tokens": 16384,
             "stream_options": {"include_usage": true}
           }
         }
       }
     }
   },
+
   "model": "nvidia/z-ai/glm-5.2"
 }

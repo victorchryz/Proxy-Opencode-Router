@@ -82,7 +82,7 @@ Proxy-Opencode-Router/
 
 ### Cascata com prioridade fixa
 
-Ordem fixa de preferência: `glm-5.2 → deepseek-v4-pro → kimi-k2.6 → minimax-m3`
+Ordem fixa de preferência: `glm-5.2 → kimi-k2.6 → minimax-m3 → deepseek-v4-pro → inkling`
 
 - **Alternância K1↔K2:** `globalKeyToggle` alterna a chave a cada request
 - **lastUsedModel:** anti-repetição — se o modelo usado na última requisição
