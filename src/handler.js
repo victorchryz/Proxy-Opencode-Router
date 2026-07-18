@@ -23,7 +23,7 @@ import {
   newTagState,
   newStreamState,
 } from './normalize.js';
-import { createProxyHeaders, buildFetchOptions, prepareBody } from './prepare.js';
+import { createProxyHeaders, prepareBody } from './prepare.js';
 import { recordRequest, snapshot as metricsSnapshot } from './metrics.js';
 import { ts, visualTag, debug, isDebug } from './logger.js';
 import { HOP_BY_HOP, CONTEXT_OVERFLOW_RE } from './constants.js';
@@ -226,7 +226,7 @@ async function runFallback(req, res, parsedOriginal, nextEp, fallbackStreamId, t
     const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[fkIdx]);
     console.log(`${ts()} [FALLBACK] -> ${visualTag(nextEp.provider, nextEp.model, fkIdx)}`);
 
-    const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+    const response = await fetch(url, { method: req.method, headers, body, signal: controller.signal });
     clearTimeout(initialTimer);
 
     if (response.status >= 400) {
@@ -413,7 +413,7 @@ export async function handleRequest(req, res) {
           const headers = createProxyHeaders(req.headers, provider.baseUrl, provider.keys[kIdx]);
           console.log(`${ts()} [INÍCIO] -> ${visualTag(endpoint.provider, endpoint.model, kIdx)}`);
 
-          const response = await fetch(url, buildFetchOptions(req.method, headers, body, controller.signal));
+          const response = await fetch(url, { method: req.method, headers, body, signal: controller.signal });
           clearTimeout(initialTimer);
           gotResponseHeaders = true;
           chunkTimer = makeChunkTimer(state.streamTimeout, () => {
@@ -571,19 +571,7 @@ export async function handleRequest(req, res) {
 
             if (!fallbackOk && !clientRef.value) {
               console.log(`${ts()} [FALLBACK] Todos os modelos falharam.`);
-              await sendSyntheticChunk(res, fallbackStreamId, '[Todos os fallbacks falharam]', 'proxy');
-              await writeSSE(
-                res,
-                'data: ' +
-                  JSON.stringify({
-                    id: fallbackStreamId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: 'proxy',
-                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
-                  }) +
-                  '\n\n',
-              );
+              await emitErrorStream(res, fallbackStreamId, '[Todos os fallbacks falharam]');
             }
           } else if (streamState.finishChunkBuf) {
             if (!streamState.headersSent) {
