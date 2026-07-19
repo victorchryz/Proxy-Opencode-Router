@@ -44,7 +44,5 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 // launched from a non-interactive command runner that closes after spawn).
 process.on('SIGHUP', () => console.log('[SIGHUP] ignorado (proxy continua ativo)'));
 
-// Diagnostic: log unexpected exits so we can tell crash vs signal apart.
-
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err?.stack ?? err));
 process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.stack ?? err));

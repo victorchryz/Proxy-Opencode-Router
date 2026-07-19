@@ -16,6 +16,7 @@
 
 import { getState } from './state.js';
 import { ENV } from './config.js';
+import { fileURLToPath } from 'node:url';
 
 export const MODEL_MAP = {
   'glm-5.2': { provider: 'nvidia', model: 'z-ai/glm-5.2' },
@@ -94,4 +95,34 @@ export function buildDynamicCascade(provider) {
   }
 
   return cascade;
+}
+
+// Self-check: run `node src/cascade.js` to verify cascade logic. No framework.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  ENV.antiRepeat = true;
+  const assert = (cond, msg) => { if (!cond) { console.error('FAIL:', msg); process.exit(1); } };
+  const provider = { keys: ['k1', 'k2'] };
+  const reset = () => {
+    _globalKeyToggle = 1;
+    _stickyModel.clear();
+    for (const { provider, model } of Object.values(MODEL_MAP)) {
+      getState(`${provider}:${model}__0`).blockedUntil = 0;
+      getState(`${provider}:${model}__1`).blockedUntil = 0;
+    }
+  };
+  const block = (id) => { const s = getState(id); s.blockedUntil = Date.now() + 60000; };
+  // 1. Cold start diverge (K1->GLM, then sticky, K2->KIMI)
+  reset(); let r = buildDynamicCascade(provider); assert(r[0].name === 'glm-5.2' && r[0].physicalKey === 0, '1 cold K1->GLM');
+  setLastUsedModel('glm-5.2', 0); r = buildDynamicCascade(provider); assert(r[0].name === 'kimi-k2.6' && r[0].physicalKey === 1, '1 cold K2->KIMI');
+  // 2. Climb-back-up: sticky=DS, free -> GLM
+  reset(); setLastUsedModel('deepseek-v4-pro', 0); r = buildDynamicCascade(provider); assert(r[0].name === 'glm-5.2' && r[0].physicalKey === 0, '2 climb DS->GLM');
+  // 3. BLOCKED ignores other: sticky=KIMI blocked on K0, K2 sticky=KIMI -> K1 picks GLM
+  reset(); setLastUsedModel('kimi-k2.6', 0); setLastUsedModel('kimi-k2.6', 1); block('nvidia:moonshotai/kimi-k2.6__0'); r = buildDynamicCascade(provider); assert(r[0].name === 'glm-5.2' && r[0].physicalKey === 0, '3 BLOCKED->GLM');
+  // 4. Collision: both sticky=GLM -> diverge to KIMI
+  reset(); setLastUsedModel('glm-5.2', 0); setLastUsedModel('glm-5.2', 1); r = buildDynamicCascade(provider); assert(r[0].name === 'kimi-k2.6' && r[0].physicalKey === 0, '4 collision->KIMI');
+  // 5. All blocked -> absolute fallback GLM@startKey
+  reset(); ['nvidia:z-ai/glm-5.2','nvidia:moonshotai/kimi-k2.6','nvidia:minimaxai/minimax-m3','nvidia:deepseek-ai/deepseek-v4-pro','nvidia:thinkingmachines/inkling'].forEach(m => { block(m + '__0'); block(m + '__1'); }); r = buildDynamicCascade(provider); assert(r[0].name === 'glm-5.2' && r[0].physicalKey === 0, '5 all-blocked->GLM@0');
+  // 6. Legacy mode (antiRepeat=false): collectSimple returns priority order, sticky is no-op
+  ENV.antiRepeat = false; reset(); setLastUsedModel('glm-5.2', 0); r = buildDynamicCascade(provider); assert(r[0].name === 'glm-5.2' && r[0].physicalKey === 0 && _stickyModel.size === 0, '6 legacy -> GLM, sticky no-op');
+  console.log('cascade self-check: 6/6 OK');
 }

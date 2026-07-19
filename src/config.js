@@ -21,10 +21,10 @@ const parseIntSafe = (v, def) => {
  *  - streamTimeoutMs: tempo máximo sem receber NENHUM chunk (idle). Se o modelo
  *    está enviando chunks (mesmo lentos), o timer reseta a cada chunk e NUNCA
  *    aborta — pode ficar 2h pensando sem problema. Só aborta se o stream
- *    trava completamente sem enviar nada por 90s. (Default: 90000)
- *  - targetRpm: limite de RPM global do proxy (não por modelo). NVIDIA tem 40
- *    RPM POR MODELO, mas o proxy rotaciona modelos então o RPM agregado pode
- *    ser maior. (Default: 40)
+ *    trava completamente sem enviar nada por 60s. (Default: 60000)
+ *  - targetRpm: limite de RPM global do proxy (não por modelo). (Default: 12)
+ *  - antiRepeat: PROXY_ANTI_REPEAT=1 (default) usa sticky per-key anti-repetition
+ *    (K1≠K2 modelos); =0 volta ao legado (ambas no mesmo modelo).
  */
 export const ENV = {
   targetRpm: parseIntSafe(process.env.PROXY_TARGET_RPM, 12),
