@@ -66,7 +66,7 @@ function collect(keyIdx, otherKeyIdx, now) {
   return [chosen, ...rest].map((m) => ({ ...m, physicalKey: keyIdx }));
 }
 
-function collectSimple(keyIdx, now) {
+function collectSimple(keyIdx, _otherKeyIdx, now) {
   return DEFAULT_ORDER
     .map(getModelDef)
     .filter(Boolean)
@@ -80,14 +80,9 @@ export function buildDynamicCascade(provider) {
   const otherKey = (startKey + 1) % provider.keys.length;
   const now = Date.now();
 
-  let cascade;
-  if (ENV.antiRepeat) {
-    cascade = collect(startKey, otherKey, now);
-    if (cascade.length === 0 && provider.keys.length > 1) cascade = collect(otherKey, startKey, now);
-  } else {
-    cascade = collectSimple(startKey, now);
-    if (cascade.length === 0 && provider.keys.length > 1) cascade = collectSimple(otherKey, now);
-  }
+  const fn = ENV.antiRepeat ? collect : collectSimple;
+  let cascade = fn(startKey, otherKey, now);
+  if (cascade.length === 0 && provider.keys.length > 1) cascade = fn(otherKey, startKey, now);
 
   if (cascade.length === 0) {
     const fallback = getModelDef(DEFAULT_ORDER[0]);
